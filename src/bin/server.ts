@@ -10,6 +10,12 @@ const connectionConfig: IConnectionsConfig = require('../../config/connections.c
 
 logger.info('Starting API Server...');
 
+process.on('unhandledRejection', error => {
+    logger.error('Unhandled error', error);
+
+    process.exit(1);
+});
+
 const connection = new ConnectionManager(connectionConfig);
 
 (async (): Promise<void> => {

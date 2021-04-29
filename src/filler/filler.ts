@@ -105,9 +105,13 @@ export default class Filler {
         await this.reader.startProcessing();
 
         const lastBlockSpeeds: number[] = [];
+
         let blockRange = 0;
-        let lastBlockNum = 0;
         let lastBlockTime = Date.now();
+
+        let lastBlockNum = 0;
+        let lastOperations = 0;
+
         let timeout = 3600 * 1000;
 
         const interval = setInterval(async () => {
@@ -126,8 +130,9 @@ export default class Filler {
                 return;
             }
 
-            const speed = (this.reader.currentBlock - lastBlockNum) / logInterval;
-            lastBlockSpeeds.push(speed);
+            const blockSpeed = (this.reader.currentBlock - lastBlockNum) / logInterval;
+            const dbSpeed = (this.reader.database.stats.operations - lastOperations) / logInterval;
+            lastBlockSpeeds.push(blockSpeed);
 
             if (lastBlockSpeeds.length > 60) {
                 lastBlockSpeeds.shift();
@@ -145,9 +150,9 @@ export default class Filler {
                 }
 
                 logger.warn('Reader ' + this.config.name + ' - No blocks processed - Stopping in ' + Math.round((timeout - staleTime) / 1000) + ' seconds');
-            } else if (this.reader.blocksUntilHead > 120) {
+            } else if (this.reader.blocksUntilHead > 60) {
                 lastBlockTime = Date.now();
-                timeout = 3 * 60 * 1000;
+                timeout = 4 * 60 * 1000;
 
                 if (blockRange === 0) {
                     blockRange = this.reader.blocksUntilHead;
@@ -160,22 +165,25 @@ export default class Filler {
                     'Reader ' + this.config.name + ' - ' +
                     'Progress: ' + this.reader.currentBlock + ' / ' + (this.reader.currentBlock + this.reader.blocksUntilHead) + ' ' +
                     '(' + (100 * currentBlock / blockRange).toFixed(2) + '%) ' +
-                    'Speed: ' + speed.toFixed(1) + ' B/s ' +
+                    'Speed: ' + blockSpeed.toFixed(1) + ' B/s ' + dbSpeed.toFixed(0) + ' W/s ' +
+                    '[DS:' + this.reader.dsQueue.size + '|SH:' + this.reader.ship.blocksQueue.size + '] ' +
                     '(Syncs ' + formatSecondsLeft(estimateSeconds(this.reader.blocksUntilHead, averageSpeed)) + ')'
                 );
             } else {
                 lastBlockTime = Date.now();
                 blockRange = 0;
-                timeout = 3 * 60 * 1000;
+                timeout = 4 * 60 * 1000;
 
                 logger.info(
                     'Reader ' + this.config.name + ' - ' +
                     'Current Block: ' + this.reader.currentBlock + ' ' +
-                    'Speed: ' + speed.toFixed(1) + ' B/s '
+                    'Speed: ' + blockSpeed.toFixed(1) + ' B/s ' + dbSpeed.toFixed(0) + ' W/s ' +
+                    '[DS:' + this.reader.dsQueue.size + '|SH:' + this.reader.ship.blocksQueue.size + '] '
                 );
             }
 
             lastBlockNum = this.reader.currentBlock;
+            lastOperations = this.reader.database.stats.operations;
         }, logInterval * 1000);
 
         this.running = true;

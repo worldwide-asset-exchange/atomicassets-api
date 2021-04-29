@@ -93,9 +93,8 @@ export default class AtomicMarketHandler extends ContractHandler {
 
         const materializedViews = [
             'atomicmarket_template_prices',
-            'atomicmarket_auction_mints', 'atomicmarket_auction_stats',
-            'atomicmarket_buyoffer_mints', 'atomicmarket_buyoffer_stats',
-            'atomicmarket_sale_mints', 'atomicmarket_sale_stats', 'atomicmarket_sale_prices',
+            'atomicmarket_auction_mints', 'atomicmarket_buyoffer_mints',
+            'atomicmarket_sale_mints', 'atomicmarket_sale_prices',
             'atomicmarket_stats_prices', 'atomicmarket_stats_markets'
         ];
 
@@ -120,6 +119,10 @@ export default class AtomicMarketHandler extends ContractHandler {
                 await client.query(fs.readFileSync('./definitions/views/' + view + '.sql', {encoding: 'utf8'}));
             }
         }
+
+        await client.query(fs.readFileSync('./definitions/tables/atomicmarket_migrate.sql', {
+            encoding: 'utf8'
+        }));
 
         const configQuery = await client.query(
             'SELECT * FROM atomicmarket_config WHERE market_contract = $1',
@@ -203,8 +206,7 @@ export default class AtomicMarketHandler extends ContractHandler {
         }
 
         const priorityViews = [
-            'atomicmarket_auction_stats', 'atomicmarket_auction_mints',
-            'atomicmarket_sale_stats', 'atomicmarket_sale_mints'
+            'atomicmarket_auction_mints', 'atomicmarket_sale_mints', 'atomicmarket_sale_prices'
         ];
 
         for (const view of materializedViews) {
@@ -236,9 +238,9 @@ export default class AtomicMarketHandler extends ContractHandler {
         }
 
         const materializedViews = [
-            'atomicmarket_auction_mints', 'atomicmarket_auction_stats',
-            'atomicmarket_buyoffer_mints', 'atomicmarket_buyoffer_stats',
-            'atomicmarket_sale_mints', 'atomicmarket_sale_stats', 'atomicmarket_sale_prices',
+            'atomicmarket_auction_mints',
+            'atomicmarket_buyoffer_mints',
+            'atomicmarket_sale_mints', 'atomicmarket_sale_prices',
             'atomicmarket_template_prices'
         ];
 

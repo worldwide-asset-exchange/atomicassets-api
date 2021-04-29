@@ -34,6 +34,7 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
             const args = filterQueryArgs(req, {
                 page: {type: 'int', min: 1, default: 1},
                 limit: {type: 'int', min: 1, max: 100, default: 100},
+                collection_name: {type: 'string', min: 1},
                 sort: {
                     type: 'string',
                     values: [
@@ -53,20 +54,20 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                     JOIN atomicassets_offers offer ON (listing.assets_contract = offer.contract AND listing.offer_id = offer.offer_id)
                     LEFT JOIN atomicmarket_sale_prices price ON (price.market_contract = listing.market_contract AND price.sale_id = listing.sale_id)
                     LEFT JOIN atomicmarket_sale_mints mint ON (mint.market_contract = listing.market_contract AND mint.sale_id = listing.sale_id)
-                    LEFT JOIN atomicmarket_sale_stats stats ON (stats.market_contract = listing.market_contract AND stats.sale_id = listing.sale_id)
                 WHERE listing.market_contract = $1 ` + filter.str;
             const queryValues = [core.args.atomicmarket_account, ...filter.values];
             let varCounter = queryValues.length;
 
-            const blacklistFilter = buildGreylistFilter(req, varCounter, 'listing.collection_name');
-            queryValues.push(...blacklistFilter.values);
-            varCounter += blacklistFilter.values.length;
-            queryString += blacklistFilter.str;
+            if (!args.collection_name) {
+                const blacklistFilter = buildGreylistFilter(req, varCounter, 'listing.collection_name');
+                queryValues.push(...blacklistFilter.values);
+                varCounter += blacklistFilter.values.length;
+                queryString += blacklistFilter.str;
+            }
 
             const boundaryFilter = buildBoundaryFilter(
                 req, varCounter, 'listing.sale_id', 'int',
-                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time',
-                args.sort === 'updated' ? 'listing.updated_at_block' : 'listing.created_at_block'
+                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
             );
             queryValues.push(...boundaryFilter.values);
             varCounter += boundaryFilter.values.length;
@@ -81,18 +82,17 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
             }
 
-            const sortColumnMapping = {
-                sale_id: 'listing.sale_id',
-                created: 'listing.created_at_block',
-                updated: 'listing.updated_at_block',
-                price: 'price.price',
-                template_mint: 'mint.min_template_mint',
-                schema_mint: 'mint.min_schema_mint',
-                collection_mint: 'mint.min_collection_mint'
+            const sortMapping: {[key: string]: {column: string, nullable: boolean}}  = {
+                sale_id: {column: 'listing.sale_id', nullable: false},
+                created: {column: 'listing.created_at_time', nullable: false},
+                updated: {column: 'listing.updated_at_time', nullable: false},
+                price: {column: 'price.price', nullable: true},
+                template_mint: {column: 'mint.min_template_mint', nullable: true},
+                schema_mint: {column: 'mint.min_schema_mint', nullable: true},
+                collection_mint: {column: 'mint.min_collection_mint', nullable: true}
             };
 
-            // @ts-ignore
-            queryString += 'ORDER BY ' + sortColumnMapping[args.sort] + ' ' + args.order + ' NULLS LAST, listing.sale_id ASC ';
+            queryString += 'ORDER BY ' + sortMapping[args.sort].column + ' ' + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.sale_id ASC ';
             queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
             queryValues.push(args.limit);
             queryValues.push((args.page - 1) * args.limit);

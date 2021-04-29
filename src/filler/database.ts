@@ -122,12 +122,18 @@ function buildPrimaryCondition(values: {[key: string]: any}, primaryKey: string[
 export class ContractDB {
     static transactions: ContractDBTransaction[] = [];
 
-    constructor(readonly name: string, readonly connection: ConnectionManager) { }
+    public stats: {operations: number};
+
+    constructor(readonly name: string, readonly connection: ConnectionManager) {
+        this.stats = {operations: 0};
+    }
 
     async startTransaction(currentBlock?: number): Promise<ContractDBTransaction> {
         const client = await this.connection.database.pool.connect();
 
-        return new ContractDBTransaction(client, this.name, currentBlock);
+        this.stats.operations = this.stats.operations % Math.pow(2, 32);
+
+        return new ContractDBTransaction(client, this.name, this.stats, currentBlock);
     }
 
     async fetchAbi(contract: string, blockNum: number): Promise<{data: Uint8Array, block_num: number} | null> {
@@ -162,19 +168,21 @@ export class ContractDB {
         };
     }
 
-    async getReaderPosition(): Promise<{ live: boolean, block_num: number }> {
-        const query = await this.connection.database.query('SELECT live, block_num FROM contract_readers WHERE name = $1', [this.name]);
+    async getReaderPosition(): Promise<{ live: boolean, block_num: number, updated: number }> {
+        const query = await this.connection.database.query('SELECT live, block_num, updated FROM contract_readers WHERE name = $1', [this.name]);
 
         if (query.rows.length === 0) {
             return {
                 live: false,
-                block_num: 0
+                block_num: 0,
+                updated: 0
             };
         }
 
         return {
             live: query.rows[0].live,
-            block_num: parseInt(query.rows[0].block_num, 10)
+            block_num: parseInt(query.rows[0].block_num, 10),
+            updated: parseInt(query.rows[0].updated, 10)
         };
     }
 
@@ -197,7 +205,7 @@ export class ContractDBTransaction {
     actionLogs: any[];
 
     constructor(
-        readonly client: PoolClient, readonly name: string, readonly currentBlock?: number
+        readonly client: PoolClient, readonly name: string, readonly stats: {operations: number}, readonly currentBlock?: number
     ) {
         this.lock = new AwaitLock();
         this.committed = false;
@@ -284,6 +292,8 @@ export class ContractDBTransaction {
 
             const query = await this.clientQuery(queryStr, queryValues);
 
+            this.stats.operations += query.rowCount;
+
             if (primaryKey.length > 0 && this.currentBlock && reversible) {
                 const rollbacks = [];
 
@@ -352,6 +362,8 @@ export class ContractDBTransaction {
 
             const query = await this.clientQuery(queryStr, queryValues);
 
+            this.stats.operations += query.rowCount;
+
             if (query.rowCount === 0) {
                 throw new Error('Table ' + table + ' updated but no rows affacted ' + JSON.stringify(values) + ' ' + JSON.stringify(condition));
             }
@@ -395,6 +407,8 @@ export class ContractDBTransaction {
 
             const queryStr = 'DELETE FROM ' + this.client.escapeIdentifier(table) + ' WHERE ' + condition.str + ';';
             const query = await this.clientQuery(queryStr, condition.values);
+
+            this.stats.operations += selectQuery ? selectQuery.rowCount : 1;
 
             if (selectQuery && selectQuery.rows.length > 0) {
                 const rollback = this.buildRollbackQuery('insert', table, selectQuery.rows);
@@ -515,6 +529,9 @@ export class ContractDBTransaction {
                 [blockNum, this.name]
             );
 
+            logger.info('Rollback ' + query.rowCount + ' operations until block #' + blockNum);
+
+            let counter = 0;
             for (const row of query.rows) {
                 const values = row.values;
                 const condition: Condition | null = row.condition;
@@ -545,6 +562,12 @@ export class ContractDBTransaction {
                     await this.delete(row.table, condition, false, false);
                 } else {
                     throw Error('Invalid rollback operation in database');
+                }
+
+                counter += 1;
+
+                if (counter % 1000 === 0) {
+                    logger.info('Executed rollback query ' + counter + ' / ' + query.rowCount);
                 }
             }
 

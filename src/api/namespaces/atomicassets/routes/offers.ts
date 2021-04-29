@@ -91,7 +91,7 @@ export class OfferApi {
                     queryString += 'AND NOT EXISTS(SELECT * FROM contract_codes WHERE account = offer.recipient) ';
                 }
 
-                if (['asset_id', 'collection_name', 'template_id', 'schema_name'].find(key => args[key])) {
+                if (['collection_name', 'template_id', 'schema_name'].find(key => args[key])) {
                     const conditions: string[] = [];
 
                     if (args.asset_id) {
@@ -118,6 +118,15 @@ export class OfferApi {
                         'SELECT * FROM atomicassets_offers_assets offer_asset, atomicassets_assets asset ' +
                         'WHERE offer_asset.contract = offer.contract AND offer_asset.offer_id = offer.offer_id AND ' +
                         'offer_asset.contract = asset.contract AND offer_asset.asset_id = asset.asset_id AND (' + conditions.join(' OR ') + ')) ';
+                }
+
+                if (args.asset_id) {
+                    queryString += 'AND EXISTS(' +
+                        'SELECT * FROM atomicassets_offers_assets asset ' +
+                        'WHERE offer.contract = asset.contract AND offer.offer_id = asset.offer_id AND ' +
+                        'asset_id = ANY ($' + ++varCounter + ')' +
+                        ') ';
+                    queryValues.push(args.asset_id.split(','));
                 }
 
                 if (args.collection_blacklist) {
@@ -190,15 +199,15 @@ export class OfferApi {
 
                 const boundaryFilter = buildBoundaryFilter(
                     req, varCounter, 'offer_id', 'int',
-                    args.sort === 'updated' ? 'updated_at_time' : 'created_at_time', args.sort === 'updated' ? 'updated_at_block' : 'created_at_block'
+                    args.sort === 'updated' ? 'updated_at_time' : 'created_at_time'
                 );
                 queryValues.push(...boundaryFilter.values);
                 varCounter += boundaryFilter.values.length;
                 queryString += boundaryFilter.str;
 
                 const sortColumnMapping = {
-                    created: 'created_at_block',
-                    updated: 'updated_at_block'
+                    created: 'created_at_time',
+                    updated: 'updated_at_time'
                 };
 
                 if (req.originalUrl.search('/_count') >= 0) {

@@ -1,7 +1,7 @@
 import * as express from 'express';
 
-import { filterQueryArgs, mergeRequestData } from '../utils';
-import { buildAssetFilter, buildDataConditions } from '../atomicassets/utils';
+import { equalMany, filterQueryArgs, mergeRequestData } from '../utils';
+import { buildAssetFilter } from '../atomicassets/utils';
 import { AuctionApiState, BuyofferApiState, SaleApiState } from './index';
 import { AuctionState, BuyofferState, SaleState } from '../../../filler/handlers/atomicmarket';
 import { OfferState } from '../../../filler/handlers/atomicassets';
@@ -64,18 +64,15 @@ export function buildListingFilter(
     let queryString = '';
 
     if (args.seller) {
-        queryString += 'AND listing.seller = ANY ($' + ++varCounter + ') ';
-        queryValues.push(args.seller.split(','));
+        queryString += 'AND ' + equalMany('listing.seller', args.seller, queryValues, ++varCounter);
     }
 
     if (args.buyer) {
-        queryString += 'AND listing.buyer = ANY ($' + ++varCounter + ') ';
-        queryValues.push(args.buyer.split(','));
+        queryString += 'AND ' + equalMany('listing.buyer', args.buyer, queryValues, ++varCounter);
     }
 
     if (args.collection_name) {
-        queryString += 'AND listing.collection_name = ANY ($' + ++varCounter + ') ';
-        queryValues.push(args.collection_name.split(','));
+        queryString += 'AND ' + equalMany('listing.collection_name', args.collection_name, queryValues, ++varCounter);
     }
 
     if (!args.show_seller_contracts) {
@@ -150,9 +147,6 @@ export function buildSaleFilter(
         state: {type: 'string', min: 0},
         asset_id: {type: 'int', min: 1},
 
-        below_suggested_median: {type: 'bool'},
-        below_suggested_average: {type: 'bool'},
-
         max_assets: {type: 'int', min: 1},
         min_assets: {type: 'int', min: 1},
 
@@ -171,8 +165,8 @@ export function buildSaleFilter(
     queryValues.push(...listingFilter.values);
     varCounter += listingFilter.values.length;
 
-    if (hasAssetFilter(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: false});
+    if (hasAssetFilter(req) || hasDataFilters(req)) {
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
             'SELECT * ' +
@@ -186,34 +180,21 @@ export function buildSaleFilter(
         varCounter += filter.values.length;
     }
 
-    if (hasDataFilters(req)) {
-        const dataConditions = buildDataConditions(mergeRequestData(req), varCounter, '"asset_data"."data"');
-
-        if (dataConditions) {
-            queryString += 'AND EXISTS(' +
-                'SELECT * ' +
-                'FROM atomicassets_offers_assets offer_asset, atomicassets_asset_data asset_data ' +
-                'WHERE ' +
-                'asset_data.contract = offer_asset.contract AND asset_data.asset_id = offer_asset.asset_id AND ' +
-                'offer_asset.offer_id = listing.offer_id AND offer_asset.contract = listing.assets_contract ' + dataConditions.str + ' ' +
-                ') ';
-
-            queryValues.push(...dataConditions.values);
-            varCounter += dataConditions.values.length;
-        }
-    }
-
     if (args.max_assets) {
         queryString += `AND (
-            SELECT COUNT(*) FROM atomicassets_offers_assets asset 
-            WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id
+            SELECT COUNT(*) FROM (
+                SELECT FROM atomicassets_offers_assets asset
+                WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.max_assets + 1}
+            ) ct        
         ) <= ${args.max_assets} `;
     }
 
     if (args.min_assets) {
         queryString += `AND (
-            SELECT COUNT(*) FROM atomicassets_offers_assets asset 
-            WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id
+            SELECT COUNT(*) FROM (
+                SELECT FROM atomicassets_offers_assets asset
+                WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.min_assets}
+            ) ct        
         ) >= ${args.min_assets} `;
     }
 
@@ -225,14 +206,6 @@ export function buildSaleFilter(
             'asset.asset_id = $' + ++varCounter + ' ' +
             ') ';
         queryValues.push(args.asset_id);
-    }
-
-    if (args.below_suggested_median) {
-        queryString += 'AND stats.suggested_median > price.price AND stats.sales > 3 ';
-    }
-
-    if (args.below_suggested_average) {
-        queryString += 'AND stats.suggested_average > price.price AND stats.sales > 3 ';
     }
 
     if (args.symbol) {
@@ -290,9 +263,6 @@ export function buildAuctionFilter(
         state: {type: 'string', min: 0},
         asset_id: {type: 'int', min: 1},
 
-        below_suggested_median: {type: 'bool'},
-        below_suggested_average: {type: 'bool'},
-
         min_assets: {type: 'int', min: 1},
         max_assets: {type: 'int', min: 1},
 
@@ -313,8 +283,8 @@ export function buildAuctionFilter(
     queryValues.push(...listingFilter.values);
     varCounter += listingFilter.values.length;
 
-    if (hasAssetFilter(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: false});
+    if (hasAssetFilter(req) || hasDataFilters(req)) {
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
                 'SELECT * ' +
@@ -329,34 +299,16 @@ export function buildAuctionFilter(
         varCounter += filter.values.length;
     }
 
-    if (hasDataFilters(req)) {
-        const dataConditions = buildDataConditions(mergeRequestData(req), varCounter, '"asset_data"."data"');
-
-        if (dataConditions) {
-            queryString += 'AND EXISTS(' +
-                'SELECT * ' +
-                'FROM atomicmarket_auctions_assets auction_asset, atomicassets_asset_data asset_data ' +
-                'WHERE ' +
-                'asset_data.contract = auction_asset.assets_contract AND asset_data.asset_id = auction_asset.asset_id AND ' +
-                'auction_asset.auction_id = listing.auction_id AND ' +
-                'auction_asset.market_contract = listing.market_contract ' + dataConditions.str + ' ' +
-                ') ';
-
-            queryValues.push(...dataConditions.values);
-            varCounter += dataConditions.values.length;
-        }
-    }
-
     if (args.participant) {
         queryString += 'AND (';
 
         const accountVar = ++varCounter;
         queryValues.push(args.participant);
 
-        queryString += `(listing.seller = $${accountVar} AND listing.claimed_by_seller IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Date.now() / 1000})`;
-        queryString += `OR (listing.buyer = $${accountVar} AND listing.claimed_by_buyer IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Date.now() / 1000})`;
-        queryString += `OR (listing.seller = $${accountVar} and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Date.now() / 1000})`;
-        queryString += `OR (listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Date.now() / 1000} AND EXISTS(
+        queryString += `(listing.seller = $${accountVar} AND listing.claimed_by_seller IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)`;
+        queryString += `OR (listing.buyer = $${accountVar} AND listing.claimed_by_buyer IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)`;
+        queryString += `OR (listing.seller = $${accountVar} and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT)`;
+        queryString += `OR (listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT AND EXISTS(
             SELECT * FROM atomicmarket_auctions_bids bid WHERE bid.market_contract = listing.market_contract AND bid.auction_id = listing.auction_id AND bid.account = $${accountVar}
         ))`;
 
@@ -387,14 +339,6 @@ export function buildAuctionFilter(
         queryValues.push(args.asset_id);
     }
 
-    if (args.below_suggested_median) {
-        queryString += 'AND stats.suggested_median > listing.price AND stats.sales > 3 ';
-    }
-
-    if (args.below_suggested_average) {
-        queryString += 'AND stats.suggested_average > listing.price AND stats.sales > 3 ';
-    }
-
     if (args.symbol) {
         queryString += ' AND listing.token_symbol = $' + ++varCounter + ' ';
         queryValues.push(args.symbol);
@@ -418,7 +362,7 @@ export function buildAuctionFilter(
         }
 
         if (args.state.split(',').indexOf(String(AuctionApiState.LISTED.valueOf())) >= 0) {
-            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Date.now() / 1000})`);
+            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT)`);
         }
 
         if (args.state.split(',').indexOf(String(AuctionApiState.CANCELED.valueOf())) >= 0) {
@@ -426,11 +370,11 @@ export function buildAuctionFilter(
         }
 
         if (args.state.split(',').indexOf(String(AuctionApiState.SOLD.valueOf())) >= 0) {
-            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Date.now() / 1000} AND listing.buyer IS NOT NULL)`);
+            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT AND listing.buyer IS NOT NULL)`);
         }
 
         if (args.state.split(',').indexOf(String(AuctionApiState.INVALID.valueOf())) >= 0) {
-            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Date.now() / 1000} AND listing.buyer IS NULL)`);
+            stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT AND listing.buyer IS NULL)`);
         }
 
         queryString += 'AND (' + stateConditions.join(' OR ') + ') ';
@@ -450,9 +394,6 @@ export function buildBuyofferFilter(
         state: {type: 'string', min: 0},
         asset_id: {type: 'int', min: 1},
 
-        below_suggested_median: {type: 'bool'},
-        below_suggested_average: {type: 'bool'},
-
         min_assets: {type: 'int', min: 1},
         max_assets: {type: 'int', min: 1},
 
@@ -471,8 +412,8 @@ export function buildBuyofferFilter(
     queryValues.push(...listingFilter.values);
     varCounter += listingFilter.values.length;
 
-    if (hasAssetFilter(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: false});
+    if (hasAssetFilter(req) || hasDataFilters(req)) {
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
             'SELECT * ' +
@@ -485,24 +426,6 @@ export function buildBuyofferFilter(
 
         queryValues.push(...filter.values);
         varCounter += filter.values.length;
-    }
-
-    if (hasDataFilters(req)) {
-        const dataConditions = buildDataConditions(mergeRequestData(req), varCounter, '"asset_data"."data"');
-
-        if (dataConditions) {
-            queryString += 'AND EXISTS(' +
-                'SELECT * ' +
-                'FROM atomicmarket_buyoffers_assets buyoffer_asset, atomicassets_asset_data asset_data ' +
-                'WHERE ' +
-                'asset_data.contract = buyoffer_asset.assets_contract AND asset_data.asset_id = buyoffer_asset.asset_id AND ' +
-                'buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +
-                'buyoffer_asset.market_contract = listing.market_contract ' + dataConditions.str + ' ' +
-                ') ';
-
-            queryValues.push(...dataConditions.values);
-            varCounter += dataConditions.values.length;
-        }
     }
 
     if (args.max_assets) {
@@ -527,14 +450,6 @@ export function buildBuyofferFilter(
             'asset.asset_id = $' + ++varCounter + ' ' +
             ') ';
         queryValues.push(args.asset_id);
-    }
-
-    if (args.below_suggested_median) {
-        queryString += 'AND stats.suggested_median > listing.price AND stats.sales > 3 ';
-    }
-
-    if (args.below_suggested_average) {
-        queryString += 'AND stats.suggested_average > listing.price AND stats.sales > 3 ';
     }
 
     if (args.symbol) {

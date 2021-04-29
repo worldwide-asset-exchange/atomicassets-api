@@ -50,7 +50,6 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                 'FROM atomicmarket_auctions listing ' +
                     'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
                     'LEFT JOIN atomicmarket_auction_mints mint ON (mint.market_contract = listing.market_contract AND mint.auction_id = listing.auction_id) ' +
-                    'LEFT JOIN atomicmarket_auction_stats stats ON (stats.market_contract = listing.market_contract AND stats.auction_id = listing.auction_id) ' +
                 'WHERE listing.market_contract = $1 ' + auctionFilter.str;
             const queryValues = [core.args.atomicmarket_account, ...auctionFilter.values];
             let varCounter = queryValues.length;
@@ -62,8 +61,7 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
 
             const boundaryFilter = buildBoundaryFilter(
                 req, varCounter, 'listing.auction_id', 'int',
-                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time',
-                args.sort === 'updated' ? 'listing.updated_at_block' : 'listing.created_at_block'
+                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
             );
             queryValues.push(...boundaryFilter.values);
             varCounter += boundaryFilter.values.length;
@@ -78,19 +76,18 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                 return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
             }
 
-            const sortColumnMapping = {
-                auction_id: 'listing.auction_id',
-                ending: 'listing.end_time',
-                created: 'listing.created_at_block',
-                updated: 'listing.updated_at_block',
-                price: 'listing.price',
-                template_mint: 'mint.min_template_mint',
-                schema_mint: 'mint.min_schema_mint',
-                collection_mint: 'mint.min_collection_mint'
+            const sortMapping: {[key: string]: {column: string, nullable: boolean}} = {
+                auction_id: {column: 'listing.auction_id', nullable: false},
+                ending: {column: 'listing.end_time', nullable: false},
+                created: {column: 'listing.created_at_time', nullable: false},
+                updated: {column: 'listing.updated_at_time', nullable: false},
+                price: {column: 'listing.price', nullable: true},
+                template_mint: {column: 'mint.min_template_mint', nullable: true},
+                schema_mint: {column: 'mint.min_schema_mint', nullable: true},
+                collection_mint: {column: 'mint.min_collection_mint', nullable: true}
             };
 
-            // @ts-ignore
-            queryString += 'ORDER BY ' + sortColumnMapping[args.sort] + ' ' + args.order + ' NULLS LAST, listing.auction_id ASC ';
+            queryString += 'ORDER BY ' + sortMapping[args.sort].column + ' ' + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.auction_id ASC ';
             queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
             queryValues.push(args.limit);
             queryValues.push((args.page - 1) * args.limit);

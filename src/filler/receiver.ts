@@ -57,8 +57,8 @@ export default class StateReceiver {
     readonly ship: StateHistoryBlockReader;
     readonly processor: DataProcessor;
     readonly notifier: ApiNotificationSender;
+    readonly database: ContractDB;
 
-    private readonly database: ContractDB;
     private readonly abis: {[key: string]: AbiCache};
 
     constructor(
@@ -89,7 +89,18 @@ export default class StateReceiver {
     }
 
     async startProcessing(): Promise<void> {
-        const position = await this.database.getReaderPosition();
+        let position = await this.database.getReaderPosition();
+
+        while (position.updated + 10 * 1000 > Date.now()) {
+            logger.warn(
+                'This reader processed a block less than 10 seconds ago. ' +
+                'Please make sure that only 1 reader with the same name is running at the same time.'
+            );
+
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            position = await this.database.getReaderPosition();
+        }
 
         this.processor.setState(position.live ? ProcessingState.HEAD : ProcessingState.CATCHUP);
 
@@ -260,6 +271,10 @@ export default class StateReceiver {
     private async handleActionTrace(block: ShipBlock, trace: EosioActionTrace<ContractDataEstimation>, tx: EosioTransaction<ContractDataEstimation>): Promise<void> {
         const processingInfo = this.processor.actionTraceNeeded(trace.act.account, trace.act.name);
 
+        if (processingInfo.process && !this.modules.checkTrace(block, tx, trace)) {
+            return;
+        }
+
         if (processingInfo.deserialize) {
             const abi = await this.fetchContractAbi(trace.act.account, block.block_num);
 
@@ -312,6 +327,10 @@ export default class StateReceiver {
 
     private async handleContractRow(block: ShipBlock, delta: EosioContractRow<ContractDataEstimation>): Promise<void> {
         const processingInfo = this.processor.contractRowNeeded(delta.code, delta.table);
+
+        if (processingInfo.process && !this.modules.checkDelta(block, delta)) {
+            return;
+        }
 
         if (processingInfo.deserialize) {
             const abi = await this.fetchContractAbi(delta.code, block.block_num);
@@ -425,7 +444,7 @@ export default class StateReceiver {
 
             const processingInfo = this.processor.actionTraceNeeded(act.account, act.name);
 
-            if (processingInfo.deserialize) {
+            if (processingInfo.deserialize && this.modules.checkRawTrace(blockNum, row.tx, row.trace)) {
                 try {
                     const abi = await this.fetchContractAbi(act.account, blockNum);
                     const type = getActionAbiType(abi.json, act.account, act.name);
@@ -458,7 +477,7 @@ export default class StateReceiver {
 
             const processingInfo = this.processor.contractRowNeeded(delta.code, delta.table);
 
-            if (processingInfo.deserialize) {
+            if (processingInfo.deserialize && this.modules.checkRawDelta(blockNum, delta)) {
                 try {
                     const abi = await this.fetchContractAbi(delta.code, blockNum);
                     const type = getTableAbiType(abi.json, delta.code, delta.table);

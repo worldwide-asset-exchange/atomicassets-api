@@ -49,7 +49,6 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                 'FROM atomicmarket_buyoffers listing ' +
                     'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
                     'LEFT JOIN atomicmarket_buyoffer_mints mint ON (mint.market_contract = listing.market_contract AND mint.buyoffer_id = listing.buyoffer_id) ' +
-                    'LEFT JOIN atomicmarket_buyoffer_stats stats ON (stats.market_contract = listing.market_contract AND stats.buyoffer_id = listing.buyoffer_id) ' +
                 'WHERE listing.market_contract = $1 ' + buyofferFilter.str;
             const queryValues = [core.args.atomicmarket_account, ...buyofferFilter.values];
             let varCounter = queryValues.length;
@@ -61,8 +60,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
 
             const boundaryFilter = buildBoundaryFilter(
                 req, varCounter, 'listing.buyoffer_id', 'int',
-                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time',
-                args.sort === 'updated' ? 'listing.updated_at_block' : 'listing.created_at_block'
+                args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
             );
             queryValues.push(...boundaryFilter.values);
             varCounter += boundaryFilter.values.length;
@@ -79,8 +77,8 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
 
             const sortColumnMapping = {
                 buyoffer_id: 'listing.buyoffer_id',
-                created: 'listing.created_at_block',
-                updated: 'listing.updated_at_block',
+                created: 'listing.created_at_time',
+                updated: 'listing.updated_at_time',
                 price: 'listing.price',
                 template_mint: 'mint.min_template_mint',
                 schema_mint: 'mint.min_schema_mint',
