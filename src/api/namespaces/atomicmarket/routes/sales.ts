@@ -39,7 +39,7 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                     type: 'string',
                     values: [
                         'created', 'updated', 'sale_id', 'price',
-                        'template_mint', 'schema_mint', 'collection_mint'
+                        'template_mint'
                     ],
                     default: 'created'
                 },
@@ -53,7 +53,6 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 FROM atomicmarket_sales listing 
                     JOIN atomicassets_offers offer ON (listing.assets_contract = offer.contract AND listing.offer_id = offer.offer_id)
                     LEFT JOIN atomicmarket_sale_prices price ON (price.market_contract = listing.market_contract AND price.sale_id = listing.sale_id)
-                    LEFT JOIN atomicmarket_sale_mints mint ON (mint.market_contract = listing.market_contract AND mint.sale_id = listing.sale_id)
                 WHERE listing.market_contract = $1 ` + filter.str;
             const queryValues = [core.args.atomicmarket_account, ...filter.values];
             let varCounter = queryValues.length;
@@ -87,9 +86,7 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 created: {column: 'listing.created_at_time', nullable: false},
                 updated: {column: 'listing.updated_at_time', nullable: false},
                 price: {column: 'price.price', nullable: true},
-                template_mint: {column: 'mint.min_template_mint', nullable: true},
-                schema_mint: {column: 'mint.min_schema_mint', nullable: true},
-                collection_mint: {column: 'mint.min_collection_mint', nullable: true}
+                template_mint: {column: 'LOWER(listing.template_mint)', nullable: true}
             };
 
             queryString += 'ORDER BY ' + sortMapping[args.sort].column + ' ' + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.sale_id ASC ';
@@ -313,7 +310,7 @@ export function salesEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string',
                                 enum: [
                                     'created', 'updated', 'sale_id', 'price',
-                                    'template_mint', 'schema_mint', 'collection_mint'
+                                    'template_mint'
                                 ],
                                 default: 'created'
                             }

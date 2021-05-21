@@ -37,7 +37,7 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                     type: 'string',
                     values: [
                         'created', 'updated', 'ending', 'auction_id', 'price',
-                        'template_mint', 'schema_mint', 'collection_mint'
+                        'template_mint'
                     ],
                     default: 'created'
                 },
@@ -49,8 +49,12 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
             let queryString = 'SELECT listing.auction_id ' +
                 'FROM atomicmarket_auctions listing ' +
                     'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
-                    'LEFT JOIN atomicmarket_auction_mints mint ON (mint.market_contract = listing.market_contract AND mint.auction_id = listing.auction_id) ' +
-                'WHERE listing.market_contract = $1 ' + auctionFilter.str;
+                'WHERE listing.market_contract = $1 ' + auctionFilter.str + ' AND ' +
+                    'NOT EXISTS (' +
+                        'SELECT * FROM atomicmarket_auctions_assets auction_asset ' +
+                        'WHERE auction_asset.market_contract = listing.market_contract AND auction_asset.auction_id = listing.auction_id AND ' +
+                            'NOT EXISTS (SELECT * FROM atomicassets_assets asset WHERE asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id)' +
+                    ')';
             const queryValues = [core.args.atomicmarket_account, ...auctionFilter.values];
             let varCounter = queryValues.length;
 
@@ -82,9 +86,7 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                 created: {column: 'listing.created_at_time', nullable: false},
                 updated: {column: 'listing.updated_at_time', nullable: false},
                 price: {column: 'listing.price', nullable: true},
-                template_mint: {column: 'mint.min_template_mint', nullable: true},
-                schema_mint: {column: 'mint.min_schema_mint', nullable: true},
-                collection_mint: {column: 'mint.min_collection_mint', nullable: true}
+                template_mint: {column: 'LOWER(listing.template_mint)', nullable: true}
             };
 
             queryString += 'ORDER BY ' + sortMapping[args.sort].column + ' ' + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.auction_id ASC ';
@@ -201,7 +203,7 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                                 type: 'string',
                                 enum: [
                                     'created', 'updated', 'ending', 'auction_id', 'price',
-                                    'template_mint', 'schema_mint', 'collection_mint'
+                                    'template_mint'
                                 ],
                                 default: 'created'
                             }

@@ -30,7 +30,7 @@ CREATE TABLE contract_traces (
     txid bytea NOT NULL,
     created_at_block bigint NOT NULL,
     created_at_time bigint NOT NULL,
-    CONSTRAINT contract_traces_pkey PRIMARY KEY (global_sequence)
+    CONSTRAINT contract_traces_pkey PRIMARY KEY (global_sequence, account)
 );
 
 CREATE TABLE dbinfo (
@@ -70,8 +70,6 @@ CREATE INDEX contract_codes_account ON contract_codes USING hash (account);
 CREATE INDEX contract_codes_block_num ON contract_codes USING btree (block_num);
 CREATE INDEX contract_codes_block_time ON contract_codes USING btree (block_time);
 
-CREATE INDEX contract_traces_account ON contract_traces USING btree (account);
-CREATE INDEX contract_traces_name ON contract_traces USING btree (name);
 CREATE INDEX contract_traces_metadata ON contract_traces USING gin (metadata);
 CREATE INDEX contract_traces_created_at_time ON contract_traces USING btree (created_at_time);
 CREATE INDEX contract_traces_metadata_asset_id ON contract_traces USING btree ((metadata->>'asset_id'));
@@ -83,4 +81,3 @@ CREATE INDEX contract_traces_metadata_sale_id ON contract_traces USING btree ((m
 CREATE INDEX contract_traces_metadata_link_id ON contract_traces USING btree ((metadata->>'link_id'));
 
 CREATE INDEX reversible_queries_block_num ON reversible_queries USING btree (block_num);
-CREATE INDEX reversible_queries_reader ON reversible_queries USING hash (reader);

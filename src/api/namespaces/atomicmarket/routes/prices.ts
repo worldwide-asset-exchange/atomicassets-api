@@ -23,9 +23,9 @@ export function pricesEndpoints(core: AtomicMarketNamespace, server: HTTPServer,
                 symbol: {type: 'string', min: 1}
             });
 
-            let queryString = 'SELECT price.*, token.token_precision, token.token_contract, mint.template_mint ' +
-                'FROM atomicmarket_stats_prices price, atomicassets_asset_mints mint, atomicmarket_tokens token ' +
-                'WHERE price.assets_contract = mint.contract AND price.asset_id = mint.asset_id AND ' +
+            let queryString = 'SELECT price.*, token.token_precision, token.token_contract, asset.template_mint ' +
+                'FROM atomicmarket_stats_prices price, atomicassets_assets asset, atomicmarket_tokens token ' +
+                'WHERE price.assets_contract = asset.contract AND price.asset_id = asset.asset_id AND ' +
                 'price.market_contract = token.market_contract AND price.symbol = token.token_symbol AND ' +
                 'price.market_contract = $1 ';
             const queryValues = [core.args.atomicmarket_account];
@@ -329,7 +329,7 @@ export function pricesEndpoints(core: AtomicMarketNamespace, server: HTTPServer,
                     tags: ['pricing'],
                     summary: 'Get template price stats',
                     parameters: [
-                        baseAssetFilterParameters,
+                        ...baseAssetFilterParameters,
                         {
                             name: 'symbol',
                             in: 'query',
@@ -368,15 +368,6 @@ export function pricesEndpoints(core: AtomicMarketNamespace, server: HTTPServer,
                     summary: 'Gets price history for a template or schema',
                     parameters: [
                         ...assetFilterParameters,
-                        {
-                            name: 'only_duplicate_templates',
-                            in: 'query',
-                            description: 'Show only duplicate assets grouped by template',
-                            required: false,
-                            schema: {
-                                type: 'boolean'
-                            }
-                        },
                         {
                             name: 'authorized_account',
                             in: 'query',

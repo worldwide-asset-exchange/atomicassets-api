@@ -29,6 +29,18 @@ function hasDataFilters(req: express.Request): boolean {
         if (key.startsWith('data.') || key.startsWith('data:')) {
             return true;
         }
+
+        if (key.startsWith('template_data.') || key.startsWith('template_data:')) {
+            return true;
+        }
+
+        if (key.startsWith('immutable_data.') || key.startsWith('immutable_data:')) {
+            return true;
+        }
+
+        if (key.startsWith('mutable_data.') || key.startsWith('mutable_data:')) {
+            return true;
+        }
     }
 
     return false;
@@ -52,11 +64,7 @@ export function buildListingFilter(
         collection_name: {type: 'string', min: 1},
 
         min_template_mint: {type: 'int', min: 1},
-        max_template_mint: {type: 'int', min: 1},
-        min_schema_mint: {type: 'int', min: 1},
-        max_schema_mint: {type: 'int', min: 1},
-        min_collection_mint: {type: 'int', min: 1},
-        max_collection_mint: {type: 'int', min: 1}
+        max_template_mint: {type: 'int', min: 1}
     });
 
     let varCounter = varOffset;
@@ -76,10 +84,7 @@ export function buildListingFilter(
     }
 
     if (!args.show_seller_contracts) {
-        queryString += 'AND (' +
-            'NOT EXISTS(SELECT * FROM contract_codes code WHERE code.account = listing.seller) OR ' +
-            'listing.seller = ANY ($' + ++varCounter + ')' +
-            ') ';
+        queryString += 'AND NOT EXISTS(SELECT * FROM contract_codes code WHERE code.account = listing.seller AND code.account != ALL($' + ++varCounter + ')) ';
         queryValues.push(args.contract_whitelist.split(','));
     }
 
@@ -103,34 +108,10 @@ export function buildListingFilter(
         }
     }
 
-    if (args.min_template_mint) {
-        queryString += 'AND mint.max_template_mint >= $' + ++varCounter + ' ';
-        queryValues.push(args.min_template_mint);
-    }
-
-    if (args.max_template_mint) {
-        queryString += 'AND mint.min_template_mint <= $' + ++varCounter + ' ';
-        queryValues.push(args.max_template_mint);
-    }
-
-    if (args.min_schema_mint) {
-        queryString += 'AND mint.max_schema_mint >= $' + ++varCounter + ' ';
-        queryValues.push(args.min_schema_mint);
-    }
-
-    if (args.max_schema_mint) {
-        queryString += 'AND mint.min_schema_mint <= $' + ++varCounter + ' ';
-        queryValues.push(args.max_schema_mint);
-    }
-
-    if (args.min_collection_mint) {
-        queryString += 'AND mint.max_collection_mint >= $' + ++varCounter + ' ';
-        queryValues.push(args.min_collection_mint);
-    }
-
-    if (args.max_collection_mint) {
-        queryString += 'AND mint.min_collection_mint <= $' + ++varCounter + ' ';
-        queryValues.push(args.max_collection_mint);
+    if (args.min_template_mint || args.max_template_mint) {
+        queryString += 'AND listing.template_mint <@ int4range($' + ++varCounter + ', $' + ++varCounter + ', \'[]\') ';
+        queryValues.push(args.min_template_mint ?? null);
+        queryValues.push(args.max_template_mint ?? null);
     }
 
     return {
@@ -166,11 +147,12 @@ export function buildSaleFilter(
     varCounter += listingFilter.values.length;
 
     if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
             'SELECT * ' +
-            'FROM atomicassets_offers_assets offer_asset, atomicassets_assets asset ' +
+            'FROM atomicassets_offers_assets offer_asset, ' +
+                'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
             'WHERE ' +
                 'asset.contract = offer_asset.contract AND asset.asset_id = offer_asset.asset_id AND ' +
                 'offer_asset.offer_id = listing.offer_id AND offer_asset.contract = listing.assets_contract ' + filter.str + ' ' +
@@ -284,11 +266,12 @@ export function buildAuctionFilter(
     varCounter += listingFilter.values.length;
 
     if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
                 'SELECT * ' +
-                'FROM atomicassets_assets asset, atomicmarket_auctions_assets auction_asset ' +
+                'FROM atomicmarket_auctions_assets auction_asset, ' +
+                    'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
                 'WHERE ' +
                     'asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id AND ' +
                     'auction_asset.auction_id = listing.auction_id AND ' +
@@ -413,11 +396,12 @@ export function buildBuyofferFilter(
     varCounter += listingFilter.values.length;
 
     if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', allowDataFilter: true});
+        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
         queryString += 'AND EXISTS(' +
             'SELECT * ' +
-            'FROM atomicassets_assets asset, atomicmarket_buyoffers_assets buyoffer_asset ' +
+            'FROM atomicmarket_buyoffers_assets buyoffer_asset, ' +
+                'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
             'WHERE ' +
             'asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id AND ' +
             'buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +

@@ -79,7 +79,10 @@ export default class StateReceiver {
 
         this.ship = connection.createShipBlockReader({
             min_block_confirmation: config.ship_min_block_confirmation,
-            ds_threads: config.ds_ship_threads
+            ds_threads: config.ds_ship_threads,
+            allow_empty_deltas: false,
+            allow_empty_traces: false,
+            allow_empty_blocks: false
         });
 
         this.dsQueue = new PQueue({concurrency: 1, autoStart: true});
@@ -93,7 +96,7 @@ export default class StateReceiver {
 
         while (position.updated + 10 * 1000 > Date.now()) {
             logger.warn(
-                'This reader processed a block less than 10 seconds ago. ' +
+                'This reader (' + this.name + ') processed a block less than 10 seconds ago. ' +
                 'Please make sure that only 1 reader with the same name is running at the same time.'
             );
 
@@ -107,7 +110,7 @@ export default class StateReceiver {
         let startBlock = position.block_num + 1;
 
         if (this.config.start_block > 0 && this.config.start_block < startBlock) {
-            logger.warn('Reader start block cannot be lower than the last processed block. Ignoring config.');
+            logger.warn('Reader (' + this.name + ') start block cannot be lower than the last processed block. Ignoring config.');
         }
 
         startBlock = Math.max(startBlock, this.config.start_block);

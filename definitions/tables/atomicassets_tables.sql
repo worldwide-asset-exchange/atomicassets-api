@@ -8,6 +8,7 @@ CREATE TABLE atomicassets_assets (
     owner character varying(12),
     mutable_data jsonb,
     immutable_data jsonb,
+    template_mint INT,
     burned_by_account character varying(12),
     burned_at_block bigint,
     burned_at_time bigint,
@@ -36,8 +37,6 @@ CREATE TABLE atomicassets_mints (
     minter character varying(12) NOT NULL,
     receiver character varying(12) NOT NULL,
     txid bytea NOT NULL,
-    created_at_block bigint NOT NULL,
-    created_at_time bigint NOT NULL,
     CONSTRAINT atomicassets_mints_pkey PRIMARY KEY (contract, asset_id)
 );
 
@@ -137,7 +136,7 @@ CREATE TABLE atomicassets_transfers (
     txid bytea NOT NULL,
     created_at_block bigint NOT NULL,
     created_at_time bigint NOT NULL,
-    CONSTRAINT atomicassets_transfers_pkey PRIMARY KEY (transfer_id)
+    CONSTRAINT atomicassets_transfers_pkey PRIMARY KEY (contract, transfer_id)
 );
 
 CREATE TABLE atomicassets_transfers_assets (
@@ -180,29 +179,31 @@ ALTER TABLE ONLY atomicassets_schemas
     ADD CONSTRAINT atomicassets_schemas_collection_fkey FOREIGN KEY (collection_name, contract) REFERENCES atomicassets_collections(collection_name, contract) MATCH SIMPLE ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED NOT VALID;
 
 ALTER TABLE ONLY atomicassets_transfers_assets
-    ADD CONSTRAINT atomicassets_transfers_assets_transfers_fkey FOREIGN KEY (transfer_id) REFERENCES atomicassets_transfers(transfer_id) MATCH SIMPLE ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED NOT VALID;
+    ADD CONSTRAINT atomicassets_transfers_assets_transfers_fkey FOREIGN KEY (contract, transfer_id) REFERENCES atomicassets_transfers(contract, transfer_id) MATCH SIMPLE ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED NOT VALID;
 
 -- INDEXES --
 CREATE INDEX atomicassets_assets_asset_id ON atomicassets_assets USING btree (asset_id);
 CREATE INDEX atomicassets_assets_collection_name_btree ON atomicassets_assets USING btree (collection_name);
-CREATE INDEX atomicassets_assets_template_id ON atomicassets_assets USING btree (template_id);
+CREATE INDEX atomicassets_assets_template_id_asset_id ON atomicassets_assets (template_id, asset_id);
 CREATE INDEX atomicassets_assets_schema_name ON atomicassets_assets USING btree (schema_name);
 CREATE INDEX atomicassets_assets_owner_btree ON atomicassets_assets USING btree (owner);
+CREATE INDEX atomicassets_assets_mutable_data ON atomicassets_assets USING gin (mutable_data);
+CREATE INDEX atomicassets_assets_immutable_data ON atomicassets_assets USING gin (immutable_data);
+CREATE INDEX atomicassets_assets_template_mint ON atomicassets_assets USING btree (template_mint);
 CREATE INDEX atomicassets_assets_burned_by_account ON atomicassets_assets USING btree (burned_by_account);
 CREATE INDEX atomicassets_assets_burned_at_time ON atomicassets_assets USING btree (burned_at_time);
 CREATE INDEX atomicassets_assets_updated_at_time ON atomicassets_assets USING btree (updated_at_time);
 CREATE INDEX atomicassets_assets_transferred_at_time ON atomicassets_assets USING btree (transferred_at_time);
 CREATE INDEX atomicassets_assets_minted_at_time ON atomicassets_assets USING btree (minted_at_time);
+CREATE INDEX atomicassets_assets_missing_mint ON atomicassets_assets USING btree (template_id, asset_id) WHERE template_id IS NOT NULL AND template_mint IS NULL;
 
 CREATE INDEX atomicassets_assets_backed_tokens_asset_id ON atomicassets_assets_backed_tokens USING btree (asset_id);
-CREATE INDEX atomicassets_assets_backed_tokens_token_symbol ON atomicassets_assets_backed_tokens USING hash (token_symbol);
 
 CREATE INDEX atomicassets_mints_asset_id ON atomicassets_mints USING btree (asset_id);
 CREATE INDEX atomicassets_mints_minter ON atomicassets_mints USING btree (minter);
 CREATE INDEX atomicassets_mints_receiver ON atomicassets_mints USING btree (receiver);
 
-CREATE INDEX atomicassets_balances_owner ON atomicassets_balances USING hash (owner);
-CREATE INDEX atomicassets_balances_token_symbol ON atomicassets_balances USING btree (token_symbol);
+CREATE INDEX atomicassets_balances_owner_btree ON atomicassets_balances USING btree (owner);
 CREATE INDEX atomicassets_balances_updated_at_time ON atomicassets_balances USING btree (updated_at_time);
 
 CREATE INDEX atomicassets_collections_collection_name ON atomicassets_collections USING btree (collection_name);

@@ -36,7 +36,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                     type: 'string',
                     values: [
                         'created', 'updated', 'ending', 'buyoffer_id', 'price',
-                        'template_mint', 'schema_mint', 'collection_mint'
+                        'template_mint'
                     ],
                     default: 'created'
                 },
@@ -48,8 +48,12 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
             let queryString = 'SELECT listing.buyoffer_id ' +
                 'FROM atomicmarket_buyoffers listing ' +
                     'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
-                    'LEFT JOIN atomicmarket_buyoffer_mints mint ON (mint.market_contract = listing.market_contract AND mint.buyoffer_id = listing.buyoffer_id) ' +
-                'WHERE listing.market_contract = $1 ' + buyofferFilter.str;
+                'WHERE listing.market_contract = $1 ' + buyofferFilter.str + ' AND ' +
+                'NOT EXISTS (' +
+                    'SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset ' +
+                    'WHERE buyoffer_asset.market_contract = listing.market_contract AND buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +
+                '       NOT EXISTS (SELECT * FROM atomicassets_assets asset WHERE asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id)' +
+                ')';
             const queryValues = [core.args.atomicmarket_account, ...buyofferFilter.values];
             let varCounter = queryValues.length;
 
@@ -80,9 +84,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                 created: 'listing.created_at_time',
                 updated: 'listing.updated_at_time',
                 price: 'listing.price',
-                template_mint: 'mint.min_template_mint',
-                schema_mint: 'mint.min_schema_mint',
-                collection_mint: 'mint.min_collection_mint'
+                template_mint: 'LOWER(listing.template_mint)'
             };
 
             // @ts-ignore
@@ -200,7 +202,7 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                                 type: 'string',
                                 enum: [
                                     'created', 'updated', 'buyoffer_id', 'price',
-                                    'template_mint', 'schema_mint', 'collection_mint'
+                                    'template_mint'
                                 ],
                                 default: 'created'
                             }

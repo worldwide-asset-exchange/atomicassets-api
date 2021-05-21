@@ -1,7 +1,6 @@
 import { PoolClient } from 'pg';
 
 import ConnectionManager from '../../connections/manager';
-import StateReceiver from '../receiver';
 import DataProcessor from '../processor';
 import ApiNotificationSender from '../notifier';
 import Filler from '../filler';
@@ -11,14 +10,20 @@ export type ContractHandlerScope = {[key: string]: Array<{ filter: string, deser
 export abstract class ContractHandler {
     static handlerName = '';
 
-    readonly reader: StateReceiver;
     readonly connection: ConnectionManager;
+
+    static async setup(_client: PoolClient): Promise<boolean> {
+        return false;
+    }
+
+    static async upgrade(_client: PoolClient, _version: string): Promise<void> {
+        return;
+    }
 
     protected constructor(
         readonly filler: Filler,
         readonly args: {[key: string]: any}
     ) {
-        this.reader = filler.reader;
         this.connection = filler.connection;
     }
 

@@ -29,8 +29,7 @@ export default class Filler {
     readonly reader: StateReceiver;
     readonly modules: ModuleLoader;
 
-    private readonly standardMaterializedViews: Array<{name: string, interval: number, refreshed: number}>;
-    private readonly priorityMaterializedViews: Array<{name: string, interval: number, refreshed: number}>;
+    private readonly jobs: Array<{fn: () => any, interval: number, updated: number, priority: boolean}>;
     private running: boolean;
 
     private readonly handlers: ContractHandler[];
@@ -40,8 +39,7 @@ export default class Filler {
         this.modules = new ModuleLoader(config.modules || []);
         this.reader = new StateReceiver(config, connection, this.handlers, this.modules);
 
-        this.standardMaterializedViews = [];
-        this.priorityMaterializedViews = [];
+        this.jobs = [];
         this.running = false;
 
         logger.info(this.handlers.length + ' contract handlers registered');
@@ -96,7 +94,7 @@ export default class Filler {
 
             await this.connection.database.query(
                 'INSERT INTO contract_readers(name, block_num, block_time, live, updated) VALUES ($1, $2, $3, $4, $5)',
-                [this.config.name, 0, 0, false, Date.now()]
+                [this.config.name, 0, 0, false, 0]
             );
         }
 
@@ -138,6 +136,8 @@ export default class Filler {
                 lastBlockSpeeds.shift();
             }
 
+            const queueState = '[DS:' + this.reader.dsQueue.size + '|SH:' + this.reader.ship.blocksQueue.size + ']';
+
             if (lastBlockNum === this.reader.currentBlock && lastBlockNum > 0) {
                 const staleTime = Date.now() - lastBlockTime;
 
@@ -149,7 +149,10 @@ export default class Filler {
                     process.exit(1);
                 }
 
-                logger.warn('Reader ' + this.config.name + ' - No blocks processed - Stopping in ' + Math.round((timeout - staleTime) / 1000) + ' seconds');
+                logger.warn(
+                    'Reader ' + this.config.name + ' - No blocks processed ' + queueState + ' - ' +
+                    'Stopping in ' + Math.round((timeout - staleTime) / 1000) + ' seconds'
+                );
             } else if (this.reader.blocksUntilHead > 60) {
                 lastBlockTime = Date.now();
                 timeout = 4 * 60 * 1000;
@@ -166,7 +169,7 @@ export default class Filler {
                     'Progress: ' + this.reader.currentBlock + ' / ' + (this.reader.currentBlock + this.reader.blocksUntilHead) + ' ' +
                     '(' + (100 * currentBlock / blockRange).toFixed(2) + '%) ' +
                     'Speed: ' + blockSpeed.toFixed(1) + ' B/s ' + dbSpeed.toFixed(0) + ' W/s ' +
-                    '[DS:' + this.reader.dsQueue.size + '|SH:' + this.reader.ship.blocksQueue.size + '] ' +
+                    queueState + ' ' +
                     '(Syncs ' + formatSecondsLeft(estimateSeconds(this.reader.blocksUntilHead, averageSpeed)) + ')'
                 );
             } else {
@@ -178,7 +181,7 @@ export default class Filler {
                     'Reader ' + this.config.name + ' - ' +
                     'Current Block: ' + this.reader.currentBlock + ' ' +
                     'Speed: ' + blockSpeed.toFixed(1) + ' B/s ' + dbSpeed.toFixed(0) + ' W/s ' +
-                    '[DS:' + this.reader.dsQueue.size + '|SH:' + this.reader.ship.blocksQueue.size + '] '
+                    queueState + ' '
                 );
             }
 
@@ -188,41 +191,61 @@ export default class Filler {
 
         this.running = true;
 
-        setTimeout(async () => {
+        (async (): Promise<void> => {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            let counter = 0;
+
             while (this.running) {
-                for (const view of this.standardMaterializedViews) {
-                    if (view.refreshed + view.interval < Date.now()) {
-                        try {
-                            await this.connection.database.query('REFRESH MATERIALIZED VIEW CONCURRENTLY ' + view.name);
-                        } catch (err){
-                            logger.error('Error while refreshing materalized view ' + view.name, err);
-                        } finally {
-                            view.refreshed = Date.now();
-                        }
+                const jobs = this.jobs.filter(row => row.priority);
+
+                counter = counter >= jobs.length ? 0 : counter;
+
+                const job = jobs[counter];
+
+                if (job && job.updated + job.interval < Date.now()) {
+                    try {
+                        await job.fn();
+                    } catch (err){
+                        logger.error('Error while refreshing priority job', err);
+                    } finally {
+                        job.updated = Date.now();
                     }
                 }
 
+                counter += 1;
+
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
-        }, 5000);
+        })().then();
 
-        setTimeout(async () => {
+        (async (): Promise<void> => {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            let counter = 0;
+
             while (this.running) {
-                for (const view of this.priorityMaterializedViews) {
-                    if (view.refreshed + view.interval < Date.now()) {
-                        try {
-                            await this.connection.database.query('REFRESH MATERIALIZED VIEW CONCURRENTLY ' + view.name);
-                        } catch (err){
-                            logger.error('Error while refreshing materalized view ' + view.name, err);
-                        } finally {
-                            view.refreshed = Date.now();
-                        }
+                const jobs = this.jobs.filter(row => !row.priority);
+
+                counter = counter >= jobs.length ? 0 : counter;
+
+                const job = jobs[counter];
+
+                if (job && job.updated + job.interval < Date.now()) {
+                    try {
+                        await job.fn();
+                    } catch (err){
+                        logger.error('Error while refreshing standard job', err);
+                    } finally {
+                        job.updated = Date.now();
                     }
                 }
 
+                counter += 1;
+
                 await new Promise(resolve => setTimeout(resolve, 1000));
             }
-        }, 5000);
+        })().then();
     }
 
     async stopFiller(): Promise<void> {
@@ -231,11 +254,17 @@ export default class Filler {
         await this.reader.stopProcessing();
     }
 
-    registerMaterializedViewRefresh(name: string, interval: number, priority = false): void {
-        if (priority) {
-            this.priorityMaterializedViews.push({name, interval, refreshed: Date.now()});
-        } else {
-            this.standardMaterializedViews.push({name, interval, refreshed: Date.now()});
-        }
+    registerUpdateJob(fn: () => any, interval: number, priority = false): () => void {
+        const element = {fn, interval, updated: Date.now(), priority};
+
+        this.jobs.push(element);
+
+        return (): void => {
+            const index = this.jobs.indexOf(element);
+
+            if (index >= 0) {
+                this.jobs.splice(index, 1);
+            }
+        };
     }
 }
