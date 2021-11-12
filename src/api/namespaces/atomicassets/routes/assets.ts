@@ -2,9 +2,8 @@ import * as express from 'express';
 
 import { AtomicAssetsNamespace } from '../index';
 import { HTTPServer } from '../../../server';
-import { buildAssetFilter, buildGreylistFilter, hideOfferAssets } from '../utils';
+import { buildAssetFilter, buildGreylistFilter, buildHideOffersFilter, hasAssetFilter, hasDataFilters } from '../utils';
 import { buildBoundaryFilter, filterQueryArgs } from '../../utils';
-import logger from '../../../../utils/winston';
 import {
     primaryBoundaryParameters,
     getOpenAPI3Responses,
@@ -12,82 +11,124 @@ import {
     dateBoundaryParameters,
     actionGreylistParameters
 } from '../../../docs';
-import { assetFilterParameters, atomicDataFilter, greylistFilterParameters, hideOffersParameters } from '../openapi';
+import {
+    extendedAssetFilterParameters,
+    atomicDataFilter,
+    greylistFilterParameters,
+    hideOffersParameters,
+    baseAssetFilterParameters, completeAssetFilterParameters
+} from '../openapi';
 import { fillAssets, FillerHook } from '../filler';
 import {
     applyActionGreylistFilters,
     createSocketApiNamespace,
     extractNotificationIdentifiers,
-    getContractActionLogs
+    getContractActionLogs, respondApiError
 } from '../../../utils';
 import ApiNotificationReceiver from '../../../notification';
 import { NotificationData } from '../../../../filler/notifier';
+import QueryBuilder from '../../../builder';
 
 export function buildAssetQueryCondition(
-    req: express.Request, varOffset: number,
-    options: {assetTable?: string, templateTable?: string} = {}
-): {values: any[], str: string} {
+    req: express.Request, query: QueryBuilder,
+    options: {assetTable: string, templateTable?: string}
+): void {
     const args = filterQueryArgs(req, {
         authorized_account: {type: 'string', min: 1, max: 12},
+        hide_templates_by_accounts: {type: 'string', min: 1, max: 12},
+
         only_duplicate_templates: {type: 'bool'},
+        has_backed_tokens: {type: 'bool'},
 
         template_mint: {type: 'int', min: 1},
 
         min_template_mint: {type: 'int', min: 1},
-        max_template_mint: {type: 'int', min: 1}
+        max_template_mint: {type: 'int', min: 1},
+
+        template_blacklist: {type: 'string', min: 1},
+        template_whitelist: {type: 'string', min: 1}
     });
 
-    let queryString = ' ';
-    let queryValues: any[] = [];
-    let varCounter = varOffset;
-
     if (args.authorized_account) {
-        queryString += 'AND EXISTS(' +
+        query.addCondition(
+            'EXISTS(' +
             'SELECT * FROM atomicassets_collections collection ' +
             'WHERE collection.collection_name = ' + options.assetTable + '.collection_name AND collection.contract = ' + options.assetTable + '.contract ' +
-            'AND $' + ++varCounter + ' = ANY(collection.authorized_accounts)' +
-            ') ';
-        queryValues.push(args.authorized_account);
+            'AND ' + query.addVariable(args.authorized_account) + ' = ANY(collection.authorized_accounts)' +
+            ')'
+        );
+    }
+
+    if (args.hide_templates_by_accounts) {
+        query.addCondition(
+            'NOT EXISTS(' +
+            'SELECT * FROM atomicassets_assets asset2 ' +
+            'WHERE asset2.template_id = ' + options.assetTable + '.template_id AND asset2.contract = ' + options.assetTable + '.contract ' +
+            'AND asset2.owner = ANY(' + query.addVariable(args.hide_templates_by_accounts.split(',')) + ')' +
+            ')'
+        );
     }
 
     if (args.only_duplicate_templates) {
-        queryString += 'AND EXISTS (' +
+        query.addCondition(
+            'EXISTS (' +
             'SELECT * FROM atomicassets_assets inner_asset ' +
             'WHERE inner_asset.contract = asset.contract AND inner_asset.template_id = ' + options.assetTable + '.template_id ' +
             'AND inner_asset.asset_id < ' + options.assetTable + '.asset_id AND inner_asset.owner = ' + options.assetTable + '.owner' +
-            ') AND ' + options.assetTable + '.template_id IS NOT NULL ';
+            ') AND ' + options.assetTable + '.template_id IS NOT NULL'
+        );
     }
 
-    queryString += hideOfferAssets(req);
+    if (typeof args.has_backed_tokens === 'boolean') {
+        if (args.has_backed_tokens) {
+            query.addCondition('EXISTS (' +
+                'SELECT * FROM atomicassets_assets_backed_tokens token ' +
+                'WHERE ' + options.assetTable + '.contract = token.contract AND ' + options.assetTable + '.asset_id = token.asset_id' +
+                ')');
+        } else {
+            query.addCondition('NOT EXISTS (' +
+                'SELECT * FROM atomicassets_assets_backed_tokens token ' +
+                'WHERE ' + options.assetTable + '.contract = token.contract AND ' + options.assetTable + '.asset_id = token.asset_id' +
+                ')');
+        }
+    }
+
+    buildHideOffersFilter(req, query, options.assetTable);
 
     if (args.template_mint) {
-        queryString += 'AND ' + options.assetTable + '.template_mint = $' + ++varCounter + ' ';
-        queryValues.push(args.template_mint);
+        query.equal(options.assetTable + '.template_mint', args.template_mint);
     }
 
     if (args.min_template_mint) {
-        queryString += 'AND ' + options.assetTable + '.template_mint >= $' + ++varCounter + ' ';
-        queryValues.push(args.min_template_mint);
+        let condition = options.assetTable + '.template_mint >= ' + query.addVariable(args.min_template_mint);
+
+        if (args.min_template_mint <= 1) {
+            condition += ' OR ' + options.assetTable + '.template_id IS NULL';
+        }
+
+        query.addCondition('(' + condition + ')');
     }
 
     if (args.max_template_mint) {
-        queryString += 'AND ' + options.assetTable + '.template_mint <= $' + ++varCounter + ' ';
-        queryValues.push(args.max_template_mint);
+        let condition = options.assetTable + '.template_mint <= ' + query.addVariable(args.max_template_mint);
+
+        if (args.max_template_mint >= 1) {
+            condition += ' OR ' + options.assetTable + '.template_id IS NULL';
+        }
+
+        query.addCondition('(' + condition + ')');
     }
 
-    const assetFilter = buildAssetFilter(req, varCounter, {assetTable: options.assetTable, templateTable: options.templateTable});
-    queryValues = queryValues.concat(assetFilter.values);
-    varCounter += assetFilter.values.length;
-    queryString += assetFilter.str;
+    buildAssetFilter(req, query, {assetTable: options.assetTable, templateTable: options.templateTable});
+    buildGreylistFilter(req, query, {collectionName: options.assetTable + '.collection_name'});
 
-    const blacklistFilter = buildGreylistFilter(req, varCounter, options.assetTable + '.collection_name');
-    queryValues.push(...blacklistFilter.values);
-    queryString += blacklistFilter.str;
+    if (args.template_blacklist) {
+        query.notMany(options.assetTable + '.template_id', args.template_blacklist.split(','));
+    }
 
-    return {
-        values: queryValues,
-        str: queryString
-    };
+    if (args.template_whitelist) {
+        query.equalMany(options.assetTable + '.template_id', args.template_whitelist.split(','));
+    }
 }
 
 export class AssetApi {
@@ -100,7 +141,7 @@ export class AssetApi {
         readonly fillerHook?: FillerHook
     ) { }
 
-    endpoints(router: express.Router): any {
+    multipleAssetEndpoints(router: express.Router): any {
         router.all(['/v1/assets', '/v1/assets/_count'], this.server.web.caching(), (async (req, res) => {
             try {
                 const args = filterQueryArgs(req, {
@@ -110,80 +151,108 @@ export class AssetApi {
                     order: {type: 'string', values: ['asc', 'desc'], default: 'desc'},
                 });
 
-                let varCounter = 1;
-                let queryString = 'SELECT asset.asset_id FROM atomicassets_assets asset ' +
+                const query = new QueryBuilder(
+                    'SELECT asset.asset_id FROM atomicassets_assets asset ' +
                     'LEFT JOIN atomicassets_templates "template" ON (' +
-                        'asset.contract = template.contract AND asset.template_id = template.template_id' +
-                    ') ';
+                    'asset.contract = template.contract AND asset.template_id = template.template_id' +
+                    ') '
+                );
 
-                queryString += 'WHERE asset.contract = $1 ';
-                let queryValues: any[] = [this.core.args.atomicassets_account];
+                query.equal('asset.contract', this.core.args.atomicassets_account);
 
-                const filter = buildAssetQueryCondition(req, varCounter, {
-                    assetTable: '"asset"', templateTable: '"template"'
-                });
-
-                queryString += filter.str;
-                varCounter += filter.values.length;
-                queryValues = queryValues.concat(filter.values);
-
-                const boundaryFilter = buildBoundaryFilter(
-                    req, varCounter,
-                    'asset.asset_id', 'int',
+                buildAssetQueryCondition(req, query, {assetTable: '"asset"', templateTable: '"template"'});
+                buildBoundaryFilter(
+                    req, query, 'asset.asset_id', 'int',
                     args.sort === 'updated' ? 'asset.updated_at_time' : 'asset.minted_at_time'
                 );
 
-                queryValues = queryValues.concat(boundaryFilter.values);
-                varCounter += boundaryFilter.values.length;
-                queryString += boundaryFilter.str;
-
                 if (req.originalUrl.search('/_count') >= 0) {
                     const countQuery = await this.server.query(
-                        'SELECT COUNT(*) counter FROM (' + queryString + ') x',
-                        queryValues
+                        'SELECT COUNT(*) counter FROM (' + query.buildString() + ') x',
+                        query.buildValues()
                     );
 
                     return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
                 }
 
-                let sorting: {column: string, nullable: boolean};
+                let sorting: {column: string, nullable: boolean, numericIndex: boolean};
 
                 if (args.sort) {
-                    const sortColumnMapping: {[key: string]: {column: string, nullable: boolean}} = {
-                        asset_id: {column: 'asset.asset_id', nullable: false},
-                        updated: {column: 'asset.updated_at_time', nullable: false},
-                        transferred: {column: 'asset.transferred_at_time', nullable: false},
-                        minted: {column: 'asset.minted_at_time', nullable: false},
-                        template_mint: {column: 'asset.template_mint', nullable: true}
+                    const sortColumnMapping: {[key: string]: {column: string, nullable: boolean, numericIndex: boolean}} = {
+                        asset_id: {column: 'asset.asset_id', nullable: false, numericIndex: true},
+                        updated: {column: 'asset.updated_at_time', nullable: false, numericIndex: true},
+                        transferred: {column: 'asset.transferred_at_time', nullable: false, numericIndex: true},
+                        minted: {column: 'asset.asset_id', nullable: false, numericIndex: true},
+                        template_mint: {column: 'asset.template_mint', nullable: true, numericIndex: false},
+                        name: {column: '"template".immutable_data->>\'name\'', nullable: true, numericIndex: false}
                     };
 
                     sorting = sortColumnMapping[args.sort];
                 }
 
                 if (!sorting) {
-                    sorting = {column: 'asset.asset_id', nullable: false};
+                    sorting = {column: 'asset.asset_id', nullable: false, numericIndex: true};
                 }
 
-                // @ts-ignore
-                queryString += 'ORDER BY ' + sorting.column + ' ' + args.order + ' ' + (sorting.nullable ? 'NULLS LAST' : '') + ', asset.asset_id ASC ';
-                queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
-                queryValues.push(args.limit);
-                queryValues.push((args.page - 1) * args.limit);
+                const ignoreIndex = (hasAssetFilter(req) || hasDataFilters(req)) && sorting.numericIndex;
 
-                const query = await this.server.query(queryString, queryValues);
+                query.append('ORDER BY ' + sorting.column + (ignoreIndex ? ' + 1 ' : ' ') + args.order + ' ' + (sorting.nullable ? 'NULLS LAST' : '') + ', asset.asset_id ASC');
+                query.append('LIMIT ' + query.addVariable(args.limit) + ' OFFSET ' + query.addVariable((args.page - 1) * args.limit));
+
+                const result = await this.server.query(query.buildString(), query.buildValues());
 
                 const assets = await fillAssets(
                     this.server, this.core.args.atomicassets_account,
-                    query.rows.map(row => row.asset_id),
+                    result.rows.map(row => row.asset_id),
                     this.assetFormatter, this.assetView, this.fillerHook
                 );
 
                 return res.json({success: true, data: assets, query_time: Date.now()});
-            } catch (e) {
-                return res.status(500).json({success: false, message: 'Internal Server Error'});
+            } catch (error) {
+                return respondApiError(res, error);
             }
         }));
 
+        return {
+            tag: {
+                name: 'assets',
+                description: 'Assets'
+            },
+            paths: {
+                '/v1/assets': {
+                    get: {
+                        tags: ['assets'],
+                        summary: 'Fetch assets.',
+                        description: atomicDataFilter,
+                        parameters: [
+                            ...baseAssetFilterParameters,
+                            ...extendedAssetFilterParameters,
+                            ...completeAssetFilterParameters,
+                            ...hideOffersParameters,
+                            ...greylistFilterParameters,
+                            ...primaryBoundaryParameters,
+                            ...dateBoundaryParameters,
+                            ...paginationParameters,
+                            {
+                                name: 'sort',
+                                in: 'query',
+                                description: 'Column to sort',
+                                required: false,
+                                schema: {
+                                    type: 'string',
+                                    enum: ['asset_id', 'minted', 'updated', 'transferred', 'template_mint', 'name'],
+                                    default: 'asset_id'
+                                }
+                            }
+                        ],
+                        responses: getOpenAPI3Responses([200, 500], {type: 'array', items: {'$ref': '#/components/schemas/' + this.schema}})
+                    }
+                }
+            }
+        };
+    }
+
+    singleAssetEndpoints(router: express.Router): any {
         router.all('/v1/assets/:asset_id', this.server.web.caching({ignoreQueryString: true}), (async (req, res) => {
             try {
                 const assets = await fillAssets(
@@ -197,8 +266,8 @@ export class AssetApi {
                 }
 
                 return res.json({success: true, data: assets[0], query_time: Date.now()});
-            } catch (e) {
-                return res.status(500).json({success: false, message: 'Internal Server Error'});
+            } catch (error) {
+                return respondApiError(res, error);
             }
         }));
 
@@ -221,8 +290,8 @@ export class AssetApi {
                 );
 
                 return res.json({success: true, data: query.rows[0]});
-            } catch (e) {
-                res.status(500).json({success: false, message: 'Internal Server Error'});
+            } catch (error) {
+                return respondApiError(res, error);
             }
         }));
 
@@ -245,10 +314,8 @@ export class AssetApi {
                         (args.page - 1) * args.limit, args.limit, args.order
                     ), query_time: Date.now()
                 });
-            } catch (e) {
-                logger.error(e);
-
-                return res.status(500).json({success: false, message: 'Internal Server Error'});
+            } catch (error) {
+                return respondApiError(res, error);
             }
         }));
 
@@ -258,51 +325,6 @@ export class AssetApi {
                 description: 'Assets'
             },
             paths: {
-                '/v1/assets': {
-                    get: {
-                        tags: ['assets'],
-                        summary: 'Fetch assets.',
-                        description: atomicDataFilter,
-                        parameters: [
-                            ...assetFilterParameters,
-                            {
-                                name: 'only_duplicate_templates',
-                                in: 'query',
-                                description: 'Show only duplicate assets grouped by template',
-                                required: false,
-                                schema: {
-                                    type: 'boolean'
-                                }
-                            },
-                            {
-                                name: 'authorized_account',
-                                in: 'query',
-                                description: 'Filter for assets the provided account can edit. ',
-                                required: false,
-                                schema: {
-                                    type: 'string'
-                                }
-                            },
-                            ...hideOffersParameters,
-                            ...greylistFilterParameters,
-                            ...primaryBoundaryParameters,
-                            ...dateBoundaryParameters,
-                            ...paginationParameters,
-                            {
-                                name: 'sort',
-                                in: 'query',
-                                description: 'Column to sort',
-                                required: false,
-                                schema: {
-                                    type: 'string',
-                                    enum: ['asset_id', 'minted', 'updated', 'transferred', 'template_mint'],
-                                    default: 'asset_id'
-                                }
-                            }
-                        ],
-                        responses: getOpenAPI3Responses([200, 500], {type: 'array', items: {'$ref': '#/components/schemas/' + this.schema}})
-                    }
-                },
                 '/v1/assets/{asset_id}': {
                     get: {
                         tags: ['assets'],

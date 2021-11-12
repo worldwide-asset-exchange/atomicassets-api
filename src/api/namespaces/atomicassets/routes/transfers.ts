@@ -4,11 +4,13 @@ import { AtomicAssetsNamespace } from '../index';
 import { HTTPServer } from '../../../server';
 import { buildBoundaryFilter, filterQueryArgs } from '../../utils';
 import { FillerHook, fillTransfers } from '../filler';
-import { getOpenAPI3Responses, paginationParameters } from '../../../docs';
+import { dateBoundaryParameters, getOpenAPI3Responses, paginationParameters, primaryBoundaryParameters } from '../../../docs';
 import { greylistFilterParameters } from '../openapi';
 import ApiNotificationReceiver from '../../../notification';
-import { createSocketApiNamespace } from '../../../utils';
+import { createSocketApiNamespace, respondApiError } from '../../../utils';
 import { NotificationData } from '../../../../filler/notifier';
+import { buildAssetFilter, hasAssetFilter } from '../utils';
+import QueryBuilder from '../../../builder';
 
 export class TransferApi {
     constructor(
@@ -32,132 +34,114 @@ export class TransferApi {
                     order: {type: 'string', values: ['asc', 'desc'], default: 'desc'},
 
                     asset_id: {type: 'string', min: 1},
-                    collection_name: {type: 'string', min: 1},
-                    template_id: {type: 'string', min: 1},
-                    schema_name: {type: 'string', min: 1},
+
                     collection_blacklist: {type: 'string', min: 1},
                     collection_whitelist: {type: 'string', min: 1},
 
                     account: {type: 'string', min: 1},
                     sender: {type: 'string', min: 1},
-                    recipient: {type: 'string', min: 1}
+                    recipient: {type: 'string', min: 1},
+
+                    hide_contracts: {type: 'bool'}
                 });
 
-                let varCounter = 1;
-                let queryString = 'SELECT * FROM ' + this.transferView + ' transfer WHERE contract = $1 ';
-
-                const queryValues: any[] = [this.core.args.atomicassets_account];
+                const query = new QueryBuilder('SELECT * FROM ' + this.transferView + ' transfer');
+                query.equal('contract', this.core.args.atomicassets_account);
 
                 if (args.account) {
-                    queryString += 'AND (sender_name = ANY ($' + ++varCounter + ') OR recipient_name = ANY ($' + varCounter + ')) ';
-                    queryValues.push(args.account.split(','));
+                    const varName = query.addVariable(args.account.split(','));
+                    query.addCondition('(sender_name = ANY (' + varName + ') OR recipient_name = ANY (' + varName + '))');
                 }
 
                 if (args.sender) {
-                    queryString += 'AND sender_name = ANY ($' + ++varCounter + ') ';
-                    queryValues.push(args.sender.split(','));
+                    query.equalMany('sender_name', args.sender.split(','));
                 }
 
                 if (args.recipient) {
-                    queryString += 'AND recipient_name = ANY ($' + ++varCounter + ') ';
-                    queryValues.push(args.recipient.split(','));
+                    query.equalMany('recipient_name', args.recipient.split(','));
                 }
 
-                if (['collection_name', 'template_id', 'schema_name'].find(key => args[key])) {
-                    const conditions: string[] = [];
+                if (hasAssetFilter(req, ['asset_id'])) {
+                    const assetQuery = new QueryBuilder('SELECT * FROM atomicassets_transfers_assets transfer_asset, atomicassets_assets asset', query.buildValues());
 
-                    if (args.asset_id) {
-                        conditions.push('transfer_asset.asset_id = ANY ($' + ++varCounter + ')');
-                        queryValues.push(args.asset_id.split(','));
-                    }
+                    assetQuery.join('asset', 'transfer_asset', ['contract', 'asset_id']);
+                    assetQuery.join('transfer_asset', 'transfer', ['contract', 'transfer_id']);
 
-                    if (args.collection_name) {
-                        conditions.push('asset.collection_name = ANY ($' + ++varCounter + ')');
-                        queryValues.push(args.collection_name.split(','));
-                    }
+                    buildAssetFilter(req, assetQuery, {assetTable: '"asset"', allowDataFilter: false});
 
-                    if (args.template_id) {
-                        conditions.push('asset.template_id = ANY ($' + ++varCounter + ')');
-                        queryValues.push(args.template_id.split(','));
-                    }
-
-                    if (args.schema_name) {
-                        conditions.push('asset.schema_name = ANY ($' + ++varCounter + ')');
-                        queryValues.push(args.schema_name.split(','));
-                    }
-
-                    queryString += 'AND EXISTS(' +
-                        'SELECT * FROM atomicassets_transfers_assets transfer_asset, atomicassets_assets asset ' +
-                        'WHERE transfer_asset.contract = transfer.contract AND transfer_asset.transfer_id = transfer.transfer_id AND ' +
-                        'transfer_asset.contract = asset.contract AND transfer_asset.asset_id = asset.asset_id AND (' + conditions.join(' OR ') + ')) ';
+                    query.addCondition('EXISTS(' + assetQuery.buildString() + ')');
+                    query.setVars(assetQuery.buildValues());
                 }
 
                 if (args.asset_id) {
-                    queryString += 'AND EXISTS(' +
+                    query.addCondition(
+                        'EXISTS(' +
                         'SELECT * FROM atomicassets_transfers_assets asset ' +
                         'WHERE transfer.contract = asset.contract AND transfer.transfer_id = asset.transfer_id AND ' +
-                        'asset_id = ANY ($' + ++varCounter + ')' +
-                        ') ';
-                    queryValues.push(args.asset_id.split(','));
+                        'asset_id = ANY (' + query.addVariable(args.asset_id.split(',')) + ')' +
+                        ') '
+                    );
                 }
 
                 if (args.collection_blacklist) {
-                    queryString += 'AND NOT EXISTS(' +
+                    query.addCondition(
+                        'NOT EXISTS(' +
                         'SELECT * FROM atomicassets_transfers_assets transfer_asset, atomicassets_assets asset ' +
                         'WHERE transfer_asset.contract = transfer.contract AND transfer_asset.transfer_id = transfer.transfer_id AND ' +
                         'transfer_asset.contract = asset.contract AND transfer_asset.asset_id = asset.asset_id AND ' +
-                        'asset.collection_name = ANY ($' + ++varCounter + ')' +
-                        ') ';
-                    queryValues.push(args.collection_blacklist.split(','));
+                        'asset.collection_name = ANY (' + query.addVariable(args.collection_blacklist.split(',')) + ')' +
+                        ') '
+                    );
                 }
 
                 if (args.collection_whitelist) {
-                    queryString += 'AND NOT EXISTS(' +
+                    query.addCondition(
+                        'NOT EXISTS(' +
                         'SELECT * FROM atomicassets_transfers_assets transfer_asset, atomicassets_assets asset ' +
                         'WHERE transfer_asset.contract = transfer.contract AND transfer_asset.transfer_id = transfer.transfer_id AND ' +
                         'transfer_asset.contract = asset.contract AND transfer_asset.asset_id = asset.asset_id AND ' +
-                        'NOT (asset.collection_name = ANY ($' + ++varCounter + '))' +
-                        ') ';
-                    queryValues.push(args.collection_whitelist.split(','));
+                        'NOT (asset.collection_name = ANY (' + query.addVariable(args.collection_whitelist.split(',')) + '))' +
+                        ')'
+                    );
                 }
 
-                const boundaryFilter = buildBoundaryFilter(
-                    req, varCounter, 'transfer_id', 'int',
-                    'created_at_time'
-                );
-                queryValues.push(...boundaryFilter.values);
-                varCounter += boundaryFilter.values.length;
-                queryString += boundaryFilter.str;
+                if (args.hide_contracts) {
+                    query.addCondition(
+                        'NOT EXISTS(SELECT * FROM contract_codes ' +
+                        'WHERE (account = transfer.recipient_name OR account = transfer.sender_name) AND NOT (account = ANY(' +
+                        query.addVariable([args.account, args.sender, args.recipient].filter(row => !!row)) +
+                        ')))'
+                    );
+                }
+
+                buildBoundaryFilter(req, query, 'transfer_id', 'int', 'created_at_time');
 
                 if (req.originalUrl.search('/_count') >= 0) {
                     const countQuery = await this.server.query(
-                        'SELECT COUNT(*) counter FROM (' + queryString + ') x',
-                        queryValues
+                        'SELECT COUNT(*) counter FROM (' + query.buildString() + ') x',
+                        query.buildValues()
                     );
 
                     return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
                 }
 
-                const sortColumnMapping = {
+                const sortColumnMapping: {[key: string]: string} = {
                     created: 'transfer_id'
                 };
 
-                // @ts-ignore
-                queryString += 'ORDER BY ' + sortColumnMapping[args.sort] + ' ' + args.order + ' ';
-                queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
-                queryValues.push(args.limit);
-                queryValues.push((args.page - 1) * args.limit);
+                query.append('ORDER BY ' + sortColumnMapping[args.sort] + ' ' + args.order);
+                query.append('LIMIT ' + query.addVariable(args.limit) + ' OFFSET ' + query.addVariable((args.page - 1) * args.limit) + ' ');
 
-                const query = await this.server.query(queryString, queryValues);
+                const result = await this.server.query(query.buildString(), query.buildValues());
                 const transfers = await fillTransfers(
                     this.server, this.core.args.atomicassets_account,
-                    query.rows.map((row) => this.transferFormatter(row)),
+                    result.rows.map((row) => this.transferFormatter(row)),
                     this.assetFormatter, this.assetView, this.fillerHook
                 );
 
                 return res.json({success: true, data: transfers, query_time: Date.now()});
-            } catch (e) {
-                res.status(500).json({success: false, message: 'Internal Server Error'});
+            } catch (error) {
+                return respondApiError(res, error);
             }
         }));
 
@@ -221,6 +205,15 @@ export class TransferApi {
                                 required: false,
                                 schema: {type: 'string'}
                             },
+                            {
+                                name: 'hide_contracts',
+                                in: 'query',
+                                description: 'dont show transfers from or to accounts that have code deployed',
+                                required: false,
+                                schema: {type: 'boolean'}
+                            },
+                            ...primaryBoundaryParameters,
+                            ...dateBoundaryParameters,
                             ...greylistFilterParameters,
                             ...paginationParameters,
                             {

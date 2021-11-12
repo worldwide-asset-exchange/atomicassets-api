@@ -4,7 +4,7 @@ import { AtomicMarketNamespace, BuyofferApiState } from '../index';
 import { HTTPServer } from '../../../server';
 import { formatBuyoffer } from '../format';
 import { fillBuyoffers } from '../filler';
-import { buildBuyofferFilter } from '../utils';
+import { buildBuyofferFilter, hasListingFilter } from '../utils';
 import {
     actionGreylistParameters,
     dateBoundaryParameters,
@@ -12,19 +12,19 @@ import {
     paginationParameters,
     primaryBoundaryParameters
 } from '../../../docs';
-import { assetFilterParameters, atomicDataFilter } from '../../atomicassets/openapi';
-import logger from '../../../../utils/winston';
+import { extendedAssetFilterParameters, atomicDataFilter, baseAssetFilterParameters } from '../../atomicassets/openapi';
 import { buildBoundaryFilter, filterQueryArgs } from '../../utils';
 import { listingFilterParameters } from '../openapi';
-import { buildGreylistFilter } from '../../atomicassets/utils';
+import { buildGreylistFilter, hasAssetFilter, hasDataFilters } from '../../atomicassets/utils';
 import {
     applyActionGreylistFilters,
     createSocketApiNamespace,
     extractNotificationIdentifiers,
-    getContractActionLogs
+    getContractActionLogs, respondApiError
 } from '../../../utils';
 import ApiNotificationReceiver from '../../../notification';
 import { NotificationData } from '../../../../filler/notifier';
+import QueryBuilder from '../../../builder';
 
 export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServer, router: express.Router): any {
     router.all(['/v1/buyoffers', '/v1/buyoffers/_count'], server.web.caching(), async (req, res) => {
@@ -43,65 +43,59 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                 order: {type: 'string', values: ['asc', 'desc'], default: 'desc'}
             });
 
-            const buyofferFilter = buildBuyofferFilter(req, 1);
-
-            let queryString = 'SELECT listing.buyoffer_id ' +
+            const query = new QueryBuilder(
+                'SELECT listing.buyoffer_id ' +
                 'FROM atomicmarket_buyoffers listing ' +
-                    'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
-                'WHERE listing.market_contract = $1 ' + buyofferFilter.str + ' AND ' +
+                'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol)'
+            );
+
+            query.equal('listing.market_contract', core.args.atomicmarket_account);
+            query.addCondition(
                 'NOT EXISTS (' +
-                    'SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset ' +
-                    'WHERE buyoffer_asset.market_contract = listing.market_contract AND buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +
+                'SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset ' +
+                'WHERE buyoffer_asset.market_contract = listing.market_contract AND buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +
                 '       NOT EXISTS (SELECT * FROM atomicassets_assets asset WHERE asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id)' +
-                ')';
-            const queryValues = [core.args.atomicmarket_account, ...buyofferFilter.values];
-            let varCounter = queryValues.length;
+                ')'
+            );
 
-            const blacklistFilter = buildGreylistFilter(req, varCounter, 'listing.collection_name');
-            queryValues.push(...blacklistFilter.values);
-            varCounter += blacklistFilter.values.length;
-            queryString += blacklistFilter.str;
-
-            const boundaryFilter = buildBoundaryFilter(
-                req, varCounter, 'listing.buyoffer_id', 'int',
+            buildBuyofferFilter(req, query);
+            buildGreylistFilter(req, query, {collectionName: 'listing.collection_name'});
+            buildBoundaryFilter(
+                req, query, 'listing.buyoffer_id', 'int',
                 args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
             );
-            queryValues.push(...boundaryFilter.values);
-            varCounter += boundaryFilter.values.length;
-            queryString += boundaryFilter.str;
 
             if (req.originalUrl.search('/_count') >= 0) {
                 const countQuery = await server.query(
-                    'SELECT COUNT(*) counter FROM (' + queryString + ') x',
-                    queryValues
+                    'SELECT COUNT(*) counter FROM (' + query.buildString() + ') x',
+                    query.buildValues()
                 );
 
                 return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
             }
 
-            const sortColumnMapping = {
-                buyoffer_id: 'listing.buyoffer_id',
-                created: 'listing.created_at_time',
-                updated: 'listing.updated_at_time',
-                price: 'listing.price',
-                template_mint: 'LOWER(listing.template_mint)'
+            const sortMapping: {[key: string]: {column: string, nullable: boolean, numericIndex: boolean}} = {
+                buyoffer_id: {column: 'listing.buyoffer_id', nullable: false, numericIndex: true},
+                created: {column: 'listing.created_at_time', nullable: false, numericIndex: true},
+                updated: {column: 'listing.updated_at_time', nullable: false, numericIndex: true},
+                price: {column: 'listing.price', nullable: false, numericIndex: false},
+                template_mint: {column: 'LOWER(listing.template_mint)', nullable: true, numericIndex: false}
             };
 
-            // @ts-ignore
-            queryString += 'ORDER BY ' + sortColumnMapping[args.sort] + ' ' + args.order + ' NULLS LAST, listing.buyoffer_id ASC ';
-            queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
-            queryValues.push(args.limit);
-            queryValues.push((args.page - 1) * args.limit);
+            const ignoreIndex = (hasAssetFilter(req) || hasDataFilters(req) || hasListingFilter(req)) && sortMapping[args.sort].numericIndex;
 
-            const buyofferQuery = await server.query(queryString, queryValues);
+            query.append('ORDER BY ' + sortMapping[args.sort].column + (ignoreIndex ? ' + 1 ' : ' ') + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.buyoffer_id ASC');
+            query.append('LIMIT ' + query.addVariable(args.limit) + ' OFFSET ' + query.addVariable((args.page - 1) * args.limit) + ' ');
+
+            const buyofferResult = await server.query(query.buildString(), query.buildValues());
 
             const buyofferLookup: {[key: string]: any} = {};
-            const query = await server.query(
+            const result = await server.query(
                 'SELECT * FROM atomicmarket_buyoffers_master WHERE market_contract = $1 AND buyoffer_id = ANY ($2)',
-                [core.args.atomicmarket_account, buyofferQuery.rows.map(row => row.buyoffer_id)]
+                [core.args.atomicmarket_account, buyofferResult.rows.map(row => row.buyoffer_id)]
             );
 
-            query.rows.reduce((prev, current) => {
+            result.rows.reduce((prev, current) => {
                 prev[String(current.buyoffer_id)] = current;
 
                 return prev;
@@ -109,12 +103,12 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
 
             const buyoffers = await fillBuyoffers(
                 server, core.args.atomicassets_account,
-                buyofferQuery.rows.map((row) => formatBuyoffer(buyofferLookup[String(row.buyoffer_id)]))
+                buyofferResult.rows.map((row) => buyofferLookup[String(row.buyoffer_id)])
             );
 
-            res.json({success: true, data: buyoffers, query_time: Date.now()});
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+            res.json({success: true, data: buyoffers.map(row => formatBuyoffer(row)), query_time: Date.now()});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -129,13 +123,13 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                 res.status(416).json({success: false, message: 'Buyoffer not found'});
             } else {
                 const buyoffers = await fillBuyoffers(
-                    server, core.args.atomicassets_account, query.rows.map((row) => formatBuyoffer(row))
+                    server, core.args.atomicassets_account, query.rows
                 );
 
-                res.json({success: true, data: buyoffers[0], query_time: Date.now()});
+                res.json({success: true, data: formatBuyoffer(buyoffers[0]), query_time: Date.now()});
             }
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -156,10 +150,8 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                     (args.page - 1) * args.limit, args.limit, args.order
                 ), query_time: Date.now()
             });
-        } catch (e) {
-            logger.error(e);
-
-            return res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     }));
 
@@ -189,7 +181,8 @@ export function buyoffersEndpoints(core: AtomicMarketNamespace, server: HTTPServ
                             schema: {type: 'string'}
                         },
                         ...listingFilterParameters,
-                        ...assetFilterParameters,
+                        ...baseAssetFilterParameters,
+                        ...extendedAssetFilterParameters,
                         ...primaryBoundaryParameters,
                         ...dateBoundaryParameters,
                         ...paginationParameters,
@@ -262,7 +255,7 @@ export function buyofferSockets(core: AtomicMarketNamespace, server: HTTPServer,
             [core.args.atomicmarket_account, buyofferIDs]
         );
 
-        const buyoffers = await fillBuyoffers(server, core.args.atomicassets_account, query.rows.map((row: any) => formatBuyoffer(row)));
+        const buyoffers = await fillBuyoffers(server, core.args.atomicassets_account, query.rows);
 
         for (const notification of notifications) {
             if (notification.type === 'trace' && notification.data.trace) {
@@ -281,7 +274,7 @@ export function buyofferSockets(core: AtomicMarketNamespace, server: HTTPServer,
                         block: notification.data.block,
                         trace: notification.data.trace,
                         buyoffer_id: buyofferID,
-                        buyoffer: buyoffer
+                        buyoffer: formatBuyoffer(buyoffer)
                     });
                 }
             } else if (notification.type === 'fork') {

@@ -6,8 +6,10 @@ import { filterQueryArgs, mergeRequestData } from '../../utils';
 import { formatCollection } from '../../atomicassets/format';
 import { SaleState } from '../../../../filler/handlers/atomicmarket';
 import { atomicassetsComponents, greylistFilterParameters } from '../../atomicassets/openapi';
-import { getOpenAPI3Responses, paginationParameters } from '../../../docs';
+import { dateBoundaryParameters, getOpenAPI3Responses, paginationParameters, primaryBoundaryParameters } from '../../../docs';
 import { buildGreylistFilter } from '../../atomicassets/utils';
+import QueryBuilder from '../../../builder';
+import { respondApiError } from '../../../utils';
 
 export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, router: express.Router): any {
     function getSaleSubCondition (state: SaleApiState, table: string, after?: number, before?: number, filterState: boolean = true): string {
@@ -149,17 +151,6 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
         `;
     }
 
-    function buildGraphStatsQuery(after?: number, before?: number): string {
-        return `
-        SELECT div("time", 24 * 3600 * 1000) "time_block", COUNT(*) sales, SUM(price) volume 
-        FROM atomicmarket_stats_markets
-        WHERE market_contract = $1 AND symbol = $2
-            ${buildRangeCondition('"time"', after, before)}
-            ${getGreylistCondition('collection_name', 3, 4)}
-        GROUP BY "time_block" ORDER BY "time_block" ASC
-        `;
-    }
-
     async function fetchSymbol(symbol: string): Promise<{token_symbol: string, token_contract: string, token_precision: number}> {
         if (!symbol) {
             return null;
@@ -196,7 +187,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -239,8 +230,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 data: {symbol, results: query.rows.map(row => formatCollection(row))},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -249,7 +240,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
             const data = mergeRequestData(req);
             const symbol = await fetchSymbol(String(data.symbol));
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -267,8 +258,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 data: {symbol, result: formatCollection(query.rows[0])},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -290,7 +281,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -320,8 +311,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 data: {symbol, results: query.rows},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -336,7 +327,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -351,16 +342,20 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
             const query = await server.query(queryString, queryValues);
 
             if (query.rowCount === 0) {
-                return res.status(416).json({success: false, message: 'Account does not have any ended listings'});
+                return res.json({
+                    success: true,
+                    data: {symbol, result: {account: req.params.account, sell_volume: '0', buy_volume: '0'}},
+                    query_time: Date.now()
+                });
             }
 
-            res.json({
+            return res.json({
                 success: true,
                 data: {symbol, result: query.rows[0]},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -378,7 +373,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -406,8 +401,81 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 data: {symbol, results: query.rows},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
+        }
+    });
+
+    router.all('/v2/stats/schemas/:collection_name', server.web.caching(), async (req, res) => {
+        try {
+            const args = filterQueryArgs(req, {
+                symbol: {type: 'string', min: 1},
+
+                before: {type: 'int', min: 1},
+                after: {type: 'int', min: 1}
+            });
+
+            const symbol = await fetchSymbol(args.symbol);
+
+            if (!symbol) {
+                return res.status(500).json({success: false, message: 'Symbol not found'});
+            }
+
+            const query = new QueryBuilder(
+                'SELECT template.schema_name, SUM(price.price) volume, COUNT(*) sales ' +
+                'FROM atomicmarket_stats_prices price, atomicassets_templates "template" '
+            );
+
+            query.addCondition('price.assets_contract = template.contract AND price.template_id = template.template_id');
+
+            query.equal('price.market_contract', core.args.atomicmarket_account);
+            query.equal('price.symbol', args.symbol);
+            query.equal('price.collection_name', req.params.collection_name);
+
+            if (args.after) {
+                query.addCondition('price.time > ' + query.addVariable(args.after) + '::BIGINT');
+            }
+
+            if (args.before) {
+                query.addCondition('price.time < ' + query.addVariable(args.before) + '::BIGINT');
+            }
+
+            query.group(['template.contract', 'template.collection_name', 'template.schema_name']);
+
+            const statsQuery = await server.query<{schema_name: string, volume: string, sales: string}>(query.buildString(), query.buildValues());
+            const schemasQuery = await server.query<{schema_name: string}>(
+                'SELECT schema_name ' +
+                'FROM atomicassets_schemas "schema" WHERE contract = $1 AND collection_name = $2 AND EXISTS ( ' +
+                    'SELECT * FROM atomicassets_assets asset ' +
+                    'WHERE asset.contract = "schema".contract AND asset.collection_name = "schema".collection_name AND ' +
+                    'asset.schema_name = "schema".schema_name AND "owner" IS NOT NULL ' +
+                ') ',
+                [core.args.atomicassets_account, req.params.collection_name]
+            );
+
+            const result = schemasQuery.rows.map(row => {
+                const stats = statsQuery.rows.find(row2 => row.schema_name === row2.schema_name);
+
+                if (stats) {
+                    return stats;
+                }
+
+                return {
+                    schema_name: row.schema_name,
+                    volume: '0',
+                    sales: '0'
+                };
+            });
+
+            result.sort((a, b) => parseInt(b.volume, 10) - parseInt(a.volume, 10));
+
+            res.json({
+                success: true,
+                data: {symbol, results: result},
+                query_time: Date.now()
+            });
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -424,7 +492,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
@@ -448,8 +516,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 },
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -459,6 +527,9 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                 collection_whitelist: {type: 'string', min: 1, default: ''},
                 collection_blacklist: {type: 'string', min: 1, default: ''},
 
+                taker_marketplace: {type: 'string'},
+                maker_marketplace: {type: 'string'},
+
                 symbol: {type: 'string', min: 1},
                 before: {type: 'int', min: 1},
                 after: {type: 'int', min: 1}
@@ -466,64 +537,76 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
-            const queryString = buildGraphStatsQuery(args.after, args.before);
+            let queryString = `SELECT div("time", 24 * 3600 * 1000) "time_block", COUNT(*) sales, SUM(price) volume, MAX(price) "max" 
+                FROM atomicmarket_stats_markets
+                WHERE market_contract = $1 AND symbol = $2
+                    ${buildRangeCondition('"time"', args.after, args.before)}
+                    ${getGreylistCondition('collection_name', 3, 4)}
+               `;
             const queryValues = [
                 core.args.atomicmarket_account, args.symbol,
                 args.collection_whitelist.split(',').filter((x: string) => !!x),
                 args.collection_blacklist.split(',').filter((x: string) => !!x),
             ];
+            let varCounter = queryValues.length;
+
+            if (typeof args.taker_marketplace === 'string') {
+                queryString += 'AND taker_marketplace = $' + ++varCounter + ' ';
+                queryValues.push(args.taker_marketplace);
+            }
+
+            if (typeof args.maker_marketplace === 'string') {
+                queryString += 'AND maker_marketplace = $' + ++varCounter + ' ';
+                queryValues.push(args.maker_marketplace);
+            }
+
+            queryString += 'GROUP BY "time_block" ORDER BY "time_block" ASC';
 
             const query = await server.query(queryString, queryValues);
 
             res.json({
                 success: true,
-                data: {symbol, results: query.rows.map(row => ({sales: row.sales, volume: row.volume, time: String(row.time_block * 3600 * 24 * 1000)}))},
+                data: {symbol, results: query.rows.map(row => ({sales: row.sales, volume: row.volume, max: row.max, time: String(row.time_block * 3600 * 24 * 1000)}))},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
     router.all('/v1/stats/sales', server.web.caching(), async (req, res) => {
         try {
             const args = filterQueryArgs(req, {
-                collection_whitelist: {type: 'string', min: 1, default: ''},
-                collection_blacklist: {type: 'string', min: 1, default: ''},
-
                 symbol: {type: 'string', min: 1}
             });
 
             const symbol = await fetchSymbol(args.symbol);
 
-            if (symbol === null) {
+            if (!symbol) {
                 return res.status(500).json({success: false, message: 'Symbol not found'});
             }
 
-            let queryString = `
-                SELECT SUM(final_price) volume, COUNT(*) sales FROM atomicmarket_sales 
-                WHERE market_contract = $1 and settlement_symbol = $2 AND state = ${SaleState.SOLD.valueOf()} 
-            `;
-            let queryValues = [core.args.atomicmarket_account, args.symbol];
+            const query = new QueryBuilder('SELECT SUM(final_price) volume, COUNT(*) sales FROM atomicmarket_sales');
 
-            const greylistFilter = buildGreylistFilter(req, queryValues.length, 'collection_name');
+            query.equal('market_contract', core.args.atomicmarket_account);
+            query.equal('settlement_symbol', args.symbol);
+            query.equal('state', SaleState.SOLD.valueOf());
 
-            queryValues = queryValues.concat(greylistFilter.values);
-            queryString += greylistFilter.str;
+            buildGreylistFilter(req, query, {collectionName: 'collection_name'});
 
-            const query = await server.query(queryString, queryValues);
+            const result = await server.query(query.buildString(), query.buildValues());
 
             res.json({
                 success: true,
-                data: {symbol, result: query.rows[0]},
+                data: {symbol, result: result.rows[0]},
                 query_time: Date.now()
             });
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -539,7 +622,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
     const CollectionResult = {
         type: 'object',
         properties: {
-            ...atomicassetsComponents.Collection,
+            ...atomicassetsComponents.Collection.properties,
             listings: {type: 'string'},
             volume: {type: 'string'},
             sales: {type: 'string'}
@@ -564,27 +647,6 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
         }
     };
 
-    const boundaryParams = [
-        {
-            name: 'after',
-            in: 'query',
-            description: 'Only sales after this time',
-            required: false,
-            schema: {
-                type: 'integer'
-            }
-        },
-        {
-            name: 'before',
-            in: 'query',
-            description: 'Only sales before this time',
-            required: false,
-            schema: {
-                type: 'integer'
-            }
-        }
-    ];
-
     return {
         tag: {
             name: 'stats',
@@ -605,7 +667,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        ...boundaryParams,
+                        ...primaryBoundaryParameters,
+                        ...dateBoundaryParameters,
                         ...paginationParameters,
                         ...greylistFilterParameters,
                         {
@@ -657,7 +720,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                         type: 'object',
                         properties: {
                             symbol: SymbolResult,
-                            result: {type: 'array', items: CollectionResult}
+                            results: {type: 'array', items: CollectionResult}
                         }
                     })
                 }
@@ -676,7 +739,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        ...boundaryParams,
+                        ...primaryBoundaryParameters,
+                        ...dateBoundaryParameters,
                         ...greylistFilterParameters,
                         ...paginationParameters,
                         {
@@ -723,7 +787,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        greylistFilterParameters
+                        ...greylistFilterParameters
                     ],
                     responses: getOpenAPI3Responses([200, 500], {
                         type: 'object',
@@ -757,7 +821,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        ...boundaryParams,
+                        ...primaryBoundaryParameters,
+                        ...dateBoundaryParameters,
                         ...paginationParameters,
                         {
                             name: 'sort',
@@ -794,7 +859,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        greylistFilterParameters
+                        ...greylistFilterParameters
                     ],
                     responses: getOpenAPI3Responses([200, 500], {
                         type: 'object',
@@ -807,7 +872,8 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                     properties: {
                                         time: {type: 'string'},
                                         volume: {type: 'string'},
-                                        sales: {type: 'string'}
+                                        sales: {type: 'string'},
+                                        max: {type: 'string'}
                                     }
                                 }
                             }
@@ -829,7 +895,7 @@ export function statsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, 
                                 type: 'string'
                             }
                         },
-                        greylistFilterParameters
+                        ...greylistFilterParameters
                     ],
                     responses: getOpenAPI3Responses([200, 500], {
                         type: 'object',

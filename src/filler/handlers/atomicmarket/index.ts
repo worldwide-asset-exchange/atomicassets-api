@@ -66,7 +66,7 @@ export enum AtomicMarketUpdatePriority {
 export default class AtomicMarketHandler extends ContractHandler {
     static handlerName = 'atomicmarket';
 
-    readonly args: AtomicMarketArgs;
+    declare readonly args: AtomicMarketArgs;
 
     config: ConfigTableRow;
 
@@ -135,6 +135,11 @@ export default class AtomicMarketHandler extends ContractHandler {
             await client.query(fs.readFileSync('./definitions/procedures/atomicmarket_auction_mints.sql', {encoding: 'utf8'}));
             await client.query(fs.readFileSync('./definitions/procedures/atomicmarket_buyoffer_mints.sql', {encoding: 'utf8'}));
             await client.query(fs.readFileSync('./definitions/procedures/atomicmarket_sale_mints.sql', {encoding: 'utf8'}));
+        }
+
+        if (version === '1.2.14') {
+            await client.query(fs.readFileSync('./definitions/views/atomicmarket_stats_prices_master.sql', {encoding: 'utf8'}));
+            await client.query(fs.readFileSync('./definitions/views/atomicmarket_template_prices_master.sql', {encoding: 'utf8'}));
         }
     }
 
@@ -269,13 +274,24 @@ export default class AtomicMarketHandler extends ContractHandler {
             destructors.push(logProcessor(this, processor));
         }
 
-        const materializedViews = [
+        const standardMaterializedViews = [
             'atomicmarket_template_prices', 'atomicmarket_stats_prices', 'atomicmarket_stats_markets'
         ];
 
-        for (const view of materializedViews) {
+        for (const view of standardMaterializedViews) {
+            let lastVacuum = Date.now();
+
             destructors.push(this.filler.registerUpdateJob(async () => {
                 await this.connection.database.query('REFRESH MATERIALIZED VIEW CONCURRENTLY ' + view + ';');
+
+                if (lastVacuum + 3600 * 24 * 1000 < Date.now()) {
+                    await this.connection.database.query('VACUUM ANALYZE ' + view + ';');
+
+                    logger.info('Successfully ran vacuum on ' + view);
+
+                    lastVacuum = Date.now();
+                }
+
             }, 60000, false));
         }
 
@@ -300,6 +316,24 @@ export default class AtomicMarketHandler extends ContractHandler {
                 [this.args.atomicmarket_account, this.filler.reader.lastIrreversibleBlock]
             );
         }, 30000, true));
+
+        const priorityMaterializedViews = ['atomicmarket_sale_prices'];
+
+        for (const view of priorityMaterializedViews) {
+            let lastVacuum = Date.now();
+
+            destructors.push(this.filler.registerUpdateJob(async () => {
+                await this.connection.database.query('REFRESH MATERIALIZED VIEW CONCURRENTLY ' + view + ';');
+
+                if (lastVacuum + 3600 * 24 * 1000 < Date.now()) {
+                    await this.connection.database.query('VACUUM ANALYZE ' + view + ';');
+
+                    logger.info('Successfully ran vacuum on ' + view);
+
+                    lastVacuum = Date.now();
+                }
+            }, 60000, true));
+        }
 
         destructors.push(this.filler.registerUpdateJob(async () => {
             await this.connection.database.query('REFRESH MATERIALIZED VIEW CONCURRENTLY atomicmarket_sale_prices;');

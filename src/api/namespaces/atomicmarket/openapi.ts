@@ -1,5 +1,4 @@
 import { atomicassetsComponents, generateOfferSchema, generateTransferSchema } from '../atomicassets/openapi';
-import { LogSchema } from '../../docs';
 
 export const atomicmarketComponents = {
     ListingAsset: {
@@ -16,7 +15,7 @@ export const atomicmarketComponents = {
                     }
                 }
             },
-            auction: {
+            auctions: {
                 type: 'array',
                 items: {
                     type: 'object',
@@ -25,12 +24,35 @@ export const atomicmarketComponents = {
                         auction_id: {type: 'string'}
                     }
                 }
+            },
+            prices: {
+                type: 'array',
+                items: {
+                    type: 'object',
+                    properties: {
+                        average: {type: 'string'},
+                        market_contract: {type: 'string'},
+                        max: {type: 'string'},
+                        median: {type: 'string'},
+                        min: {type: 'string'},
+                        sales: {type: 'string'},
+                        suggested_average: {type: 'string'},
+                        suggested_median: {type: 'string'},
+                        token: {
+                            type: 'object',
+                            properties: {
+                                token_contract: {type: 'string'},
+                                token_precision: {type: 'integer'},
+                                token_symbol: {type: 'string'}
+                            }
+                        }
+                    }
+                }
             }
         }
     },
     ListingOffer: generateOfferSchema('ListingAsset'),
     ListingTransfer: generateTransferSchema('ListingAsset'),
-    Asset: atomicassetsComponents.Asset,
     Sale: {
         type: 'object',
         properties: {
@@ -129,6 +151,47 @@ export const atomicmarketComponents = {
             created_at_time: {type: 'string'}
         }
     },
+    Buyoffer: {
+        type: 'object',
+        properties: {
+            market_contract: {type: 'string'},
+            assets_contract: {type: 'string'},
+            buyoffer_id: {type: 'string'},
+
+            seller: {type: 'string'},
+            buyer: {type: 'string'},
+
+            price: {
+                type: 'object',
+                properties: {
+                    amount: {type: 'string'},
+                    token_precision: {type: 'integer'},
+                    token_contract: {type: 'string'},
+                    token_symbol: {type: 'string'}
+                }
+            },
+
+            assets: {
+                type: 'array',
+                items: {'$ref': '#/components/schemas/Asset'}
+            },
+
+            maker_marketplace: {type: 'string', nullable: true},
+            taker_marketplace: {type: 'string', nullable: true},
+
+            collection: atomicassetsComponents.Asset.properties.collection,
+
+            state: {type: 'integer'},
+
+            memo: {type: 'string'},
+            decline_memo: {type: 'string'},
+
+            updated_at_block: {type: 'string'},
+            updated_at_time: {type: 'string'},
+            created_at_block: {type: 'string'},
+            created_at_time: {type: 'string'}
+        }
+    },
     Marketplace: {
         type: 'object',
         properties: {
@@ -137,9 +200,7 @@ export const atomicmarketComponents = {
             created_at_block: {type: 'string'},
             created_at_time: {type: 'string'}
         }
-    },
-    Collection: atomicassetsComponents.Collection,
-    Log: LogSchema
+    }
 };
 
 export const listingFilterParameters = [
@@ -158,13 +219,6 @@ export const listingFilterParameters = [
         schema: {type: 'integer'}
     },
     {
-        name: 'max_assets',
-        in: 'query',
-        description: 'Max assets per listing',
-        required: false,
-        schema: {type: 'integer'}
-    },
-    {
         name: 'show_seller_contracts',
         in: 'query',
         description: 'If false no seller contracts are shown except if they are in the contract whitelist',
@@ -176,14 +230,21 @@ export const listingFilterParameters = [
         in: 'query',
         description: 'Show these accounts even if they are contracts',
         required: false,
-        schema: {type: 'boolean'}
+        schema: {type: 'string'}
     },
     {
         name: 'seller_blacklist',
         in: 'query',
         description: 'Dont show listings from these sellers (Split multiple with ",")',
         required: false,
-        schema: {type: 'boolean'}
+        schema: {type: 'string'}
+    },
+    {
+        name: 'buyer_blacklist',
+        in: 'query',
+        description: 'Dont show listings from these buyers (Split multiple with ",")',
+        required: false,
+        schema: {type: 'string'}
     },
     {
         name: 'asset_id',
@@ -217,6 +278,13 @@ export const listingFilterParameters = [
         name: 'symbol',
         in: 'query',
         description: 'Filter by symbol',
+        required: false,
+        schema: {type: 'string'}
+    },
+    {
+        name: 'account',
+        in: 'query',
+        description: 'Filter accounts that are either seller or buyer',
         required: false,
         schema: {type: 'string'}
     },

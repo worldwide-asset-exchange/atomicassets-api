@@ -1,16 +1,21 @@
 import * as express from 'express';
 
-import { equalMany, filterQueryArgs, mergeRequestData } from '../utils';
-import { buildAssetFilter } from '../atomicassets/utils';
+import { filterQueryArgs, mergeRequestData } from '../utils';
+import { buildAssetFilter, hasAssetFilter, hasDataFilters } from '../atomicassets/utils';
 import { AuctionApiState, BuyofferApiState, SaleApiState } from './index';
 import { AuctionState, BuyofferState, SaleState } from '../../../filler/handlers/atomicmarket';
 import { OfferState } from '../../../filler/handlers/atomicassets';
+import QueryBuilder from '../../builder';
+import { ApiError } from '../../error';
 
-function hasAssetFilter(req: express.Request): boolean {
+export function hasListingFilter(req: express.Request, blacklist: string[] = []): boolean {
     const keys = Object.keys(mergeRequestData(req));
 
     for (const key of keys) {
-        if (['template_id', 'schema_name', 'owner', 'is_transferable', 'is_burnable'].indexOf(key) >= 0) {
+        if (
+            ['account', 'seller', 'buyer'].indexOf(key) >= 0 &&
+            blacklist.indexOf(key) === -1
+        ) {
             return true;
         }
     }
@@ -18,46 +23,19 @@ function hasAssetFilter(req: express.Request): boolean {
     return false;
 }
 
-function hasDataFilters(req: express.Request): boolean {
-    const keys = Object.keys(mergeRequestData(req));
-
-    for (const key of keys) {
-        if (['match'].indexOf(key) >= 0) {
-            return true;
-        }
-
-        if (key.startsWith('data.') || key.startsWith('data:')) {
-            return true;
-        }
-
-        if (key.startsWith('template_data.') || key.startsWith('template_data:')) {
-            return true;
-        }
-
-        if (key.startsWith('immutable_data.') || key.startsWith('immutable_data:')) {
-            return true;
-        }
-
-        if (key.startsWith('mutable_data.') || key.startsWith('mutable_data:')) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
-export function buildListingFilter(
-    req: express.Request, varOffset: number
-): {str: string, values: any[], counter: number} {
+export function buildListingFilter(req: express.Request, query: QueryBuilder): void {
     const args = filterQueryArgs(req, {
         show_seller_contracts: {type: 'bool', default: true},
         contract_whitelist: {type: 'string', min: 1, default: ''},
+
         seller_blacklist: {type: 'string', min: 1},
+        buyer_blacklist: {type: 'string', min: 1},
 
         maker_marketplace: {type: 'string', min: 1, max: 12},
         taker_marketplace: {type: 'string', min: 1, max: 12},
         marketplace: {type: 'string', min: 1, max: 12},
 
+        account: {type: 'string', min: 1},
         seller: {type: 'string', min: 1},
         buyer: {type: 'string', min: 1},
 
@@ -67,66 +45,71 @@ export function buildListingFilter(
         max_template_mint: {type: 'int', min: 1}
     });
 
-    let varCounter = varOffset;
-    const queryValues: any[] = [];
-    let queryString = '';
+    if (args.account) {
+        const varName = query.addVariable(args.account.split(','));
+
+        query.addCondition('(listing.buyer = ANY (' + varName + ') OR listing.seller = ANY (' + varName + '))');
+    }
 
     if (args.seller) {
-        queryString += 'AND ' + equalMany('listing.seller', args.seller, queryValues, ++varCounter);
+        query.equalMany('listing.seller', args.seller.split(','));
     }
 
     if (args.buyer) {
-        queryString += 'AND ' + equalMany('listing.buyer', args.buyer, queryValues, ++varCounter);
+        query.equalMany('listing.buyer', args.buyer.split(','));
     }
 
     if (args.collection_name) {
-        queryString += 'AND ' + equalMany('listing.collection_name', args.collection_name, queryValues, ++varCounter);
+        query.equalMany('listing.collection_name', args.collection_name.split(','));
     }
 
     if (!args.show_seller_contracts) {
-        queryString += 'AND NOT EXISTS(SELECT * FROM contract_codes code WHERE code.account = listing.seller AND code.account != ALL($' + ++varCounter + ')) ';
-        queryValues.push(args.contract_whitelist.split(','));
+        query.addCondition(
+            'NOT EXISTS(' +
+            'SELECT * FROM contract_codes code ' +
+            'WHERE code.account = listing.seller AND code.account != ALL(' + query.addVariable(args.contract_whitelist.split(',')) + ')' +
+            ')'
+        );
     }
 
     if (args.seller_blacklist) {
-        queryString += 'AND NOT (listing.seller = ANY ($' + ++varCounter + ')) ';
-        queryValues.push(args.seller_blacklist.split(','));
+        query.notMany('listing.seller', args.seller_blacklist.split(','));
+    }
+
+    if (args.buyer_blacklist) {
+        query.notMany('listing.buyer', args.buyer_blacklist.split(','));
     }
 
     if (args.marketplace) {
-        queryString += 'AND (listing.maker_marketplace = ANY ($' + ++varCounter + ') OR listing.taker_marketplace = ANY ($' + varCounter + ')) ';
-        queryValues.push(args.marketplace.split(','));
+        const varName = query.addVariable(args.marketplace.split(','));
+        query.addCondition('AND (listing.maker_marketplace = ANY (' + varName + ') OR listing.taker_marketplace = ANY (' + varName + ')) ');
     } else {
         if (args.maker_marketplace) {
-            queryString += 'AND listing.maker_marketplace = ANY ($' + ++varCounter + ') ';
-            queryValues.push(args.maker_marketplace.split(','));
+            query.equalMany('listing.maker_marketplace', args.maker_marketplace.split(','));
         }
 
         if (args.taker_marketplace) {
-            queryString += 'AND listing.taker_marketplace = ANY ($' + ++varCounter + ') ';
-            queryValues.push(args.taker_marketplace.split(','));
+            query.equalMany('listing.taker_marketplace', args.taker_marketplace.split(','));
         }
     }
 
     if (args.min_template_mint || args.max_template_mint) {
-        queryString += 'AND listing.template_mint <@ int4range($' + ++varCounter + ', $' + ++varCounter + ', \'[]\') ';
-        queryValues.push(args.min_template_mint ?? null);
-        queryValues.push(args.max_template_mint ?? null);
-    }
+        if ((args.min_template_mint && args.min_template_mint > 1) || (args.max_template_mint && args.max_template_mint < 1)) {
+            query.addCondition('listing.template_mint != \'empty\'');
+        }
 
-    return {
-        values: queryValues,
-        str: queryString,
-        counter: varCounter
-    };
+        query.addCondition(
+            'listing.template_mint <@ int4range(' +
+            query.addVariable(args.min_template_mint ?? null) + ', ' +
+            query.addVariable(args.max_template_mint ?? null) +
+            ', \'[]\')'
+        );
+    }
 }
 
-export function buildSaleFilter(
-    req: express.Request, varOffset: number
-): {str: string, values: any[], counter: number} {
+export function buildSaleFilter(req: express.Request, query: QueryBuilder): void {
     const args = filterQueryArgs(req, {
-        state: {type: 'string', min: 0},
-        asset_id: {type: 'int', min: 1},
+        state: {type: 'string', min: 1},
 
         max_assets: {type: 'int', min: 1},
         min_assets: {type: 'int', min: 1},
@@ -136,73 +119,58 @@ export function buildSaleFilter(
         max_price: {type: 'float', min: 0}
     });
 
-    let varCounter = varOffset;
-    const queryValues: any[] = [];
-    let queryString = '';
+    buildListingFilter(req, query);
 
-    const listingFilter = buildListingFilter(req, varOffset);
+    if (hasAssetFilter(req, ['collection_name']) || hasDataFilters(req)) {
+        const assetQuery = new QueryBuilder(
+            'SELECT * FROM atomicassets_offers_assets offer_asset, ' +
+            'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id)',
+            query.buildValues()
+        );
 
-    queryString += listingFilter.str;
-    queryValues.push(...listingFilter.values);
-    varCounter += listingFilter.values.length;
+        assetQuery.join('asset', 'offer_asset', ['contract', 'asset_id']);
+        assetQuery.addCondition(  'offer_asset.offer_id = listing.offer_id AND offer_asset.contract = listing.assets_contract');
 
-    if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
+        buildAssetFilter(req, assetQuery, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
-        queryString += 'AND EXISTS(' +
-            'SELECT * ' +
-            'FROM atomicassets_offers_assets offer_asset, ' +
-                'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
-            'WHERE ' +
-                'asset.contract = offer_asset.contract AND asset.asset_id = offer_asset.asset_id AND ' +
-                'offer_asset.offer_id = listing.offer_id AND offer_asset.contract = listing.assets_contract ' + filter.str + ' ' +
-            ') ';
-
-        queryValues.push(...filter.values);
-        varCounter += filter.values.length;
+        query.addCondition('EXISTS(' + assetQuery.buildString() + ')');
+        query.setVars(assetQuery.buildValues());
     }
 
     if (args.max_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM (
-                SELECT FROM atomicassets_offers_assets asset
-                WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.max_assets + 1}
-            ) ct        
-        ) <= ${args.max_assets} `;
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM (
+                    SELECT FROM atomicassets_offers_assets asset
+                    WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.max_assets + 1}
+                ) ct        
+            ) <= ${args.max_assets} `
+        );
     }
 
     if (args.min_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM (
-                SELECT FROM atomicassets_offers_assets asset
-                WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.min_assets}
-            ) ct        
-        ) >= ${args.min_assets} `;
-    }
-
-    if (args.asset_id) {
-        queryString += 'AND EXISTS(' +
-            'SELECT * FROM atomicassets_offers_assets asset ' +
-            'WHERE asset.contract = listing.assets_contract AND ' +
-            'asset.offer_id = listing.offer_id AND ' +
-            'asset.asset_id = $' + ++varCounter + ' ' +
-            ') ';
-        queryValues.push(args.asset_id);
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM (
+                    SELECT FROM atomicassets_offers_assets asset
+                    WHERE asset.contract = listing.assets_contract AND asset.offer_id = listing.offer_id LIMIT ${args.min_assets}
+                ) ct        
+            ) >= ${args.min_assets} `
+        );
     }
 
     if (args.symbol) {
-        queryString += ' AND listing.settlement_symbol = $' + ++varCounter + ' ';
-        queryValues.push(args.symbol);
+        query.equal('listing.settlement_symbol', args.symbol);
 
         if (args.min_price) {
-            queryString += 'AND price.price >= 1.0 * $' + ++varCounter + ' * POWER(10, price.settlement_precision) ';
-            queryValues.push(args.min_price);
+            query.addCondition('price.price >= 1.0 * ' + query.addVariable(args.min_price) + ' * POWER(10, price.settlement_precision)');
         }
 
         if (args.max_price) {
-            queryString += 'AND price.price <= 1.0 * $' + ++varCounter + ' * POWER(10, price.settlement_precision) ';
-            queryValues.push(args.max_price);
+            query.addCondition('price.price <= 1.0 * ' + query.addVariable(args.max_price) + ' * POWER(10, price.settlement_precision)');
         }
+    } else if (args.min_price || args.max_price) {
+        throw new ApiError('Price range filters require the "symbol" filter');
     }
 
     if (args.state) {
@@ -228,22 +196,13 @@ export function buildSaleFilter(
             stateFilters.push(`(offer.state != ${OfferState.PENDING.valueOf()} AND listing.state = ${SaleState.LISTED.valueOf()})`);
         }
 
-        queryString += 'AND (' + stateFilters.join(' OR ') + ') ';
+        query.addCondition('(' + stateFilters.join(' OR ') + ')');
     }
-
-    return {
-        values: queryValues,
-        str: queryString,
-        counter: varCounter
-    };
 }
 
-export function buildAuctionFilter(
-    req: express.Request, varOffset: number
-): {str: string, values: any[], counter: number} {
+export function buildAuctionFilter(req: express.Request, query: QueryBuilder): void {
     const args = filterQueryArgs(req, {
-        state: {type: 'string', min: 0},
-        asset_id: {type: 'int', min: 1},
+        state: {type: 'string', min: 1},
 
         min_assets: {type: 'int', min: 1},
         max_assets: {type: 'int', min: 1},
@@ -252,89 +211,86 @@ export function buildAuctionFilter(
         min_price: {type: 'float', min: 0},
         max_price: {type: 'float', min: 0},
 
-        participant: {type: 'string', min: 0}
+        participant: {type: 'string', min: 1},
+        bidder: {type: 'string', min: 1},
+
+        hide_empty_auctions: {type: 'bool'},
     });
 
-    let varCounter = varOffset;
-    const queryValues: any[] = [];
-    let queryString = '';
+    buildListingFilter(req, query);
 
-    const listingFilter = buildListingFilter(req, varCounter);
+    if (hasAssetFilter(req, ['collection_name']) || hasDataFilters(req)) {
+        const assetQuery = new QueryBuilder(
+            'SELECT * FROM atomicmarket_auctions_assets auction_asset, ' +
+            'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id)',
+            query.buildValues()
+        );
 
-    queryString += listingFilter.str;
-    queryValues.push(...listingFilter.values);
-    varCounter += listingFilter.values.length;
+        assetQuery.addCondition('asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id');
+        assetQuery.join('auction_asset', 'listing', ['market_contract', 'auction_id']);
 
-    if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
+        buildAssetFilter(req, assetQuery, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
-        queryString += 'AND EXISTS(' +
-                'SELECT * ' +
-                'FROM atomicmarket_auctions_assets auction_asset, ' +
-                    'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
-                'WHERE ' +
-                    'asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id AND ' +
-                    'auction_asset.auction_id = listing.auction_id AND ' +
-                    'auction_asset.market_contract = listing.market_contract ' + filter.str + ' ' +
-            ') ';
-
-        queryValues.push(...filter.values);
-        varCounter += filter.values.length;
+        query.addCondition('EXISTS(' + assetQuery.buildString() + ')');
+        query.setVars(assetQuery.buildValues());
     }
 
     if (args.participant) {
-        queryString += 'AND (';
+        const varName = query.addVariable(args.participant);
 
-        const accountVar = ++varCounter;
-        queryValues.push(args.participant);
+        query.addCondition(
+            `(
+                (listing.seller = ${varName} AND listing.claimed_by_seller IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)
+                OR (listing.buyer = ${varName} AND listing.claimed_by_buyer IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)
+                OR (listing.seller = ${varName} and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT)
+                OR (listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT AND EXISTS(
+                    SELECT * FROM atomicmarket_auctions_bids bid WHERE bid.market_contract = listing.market_contract AND bid.auction_id = listing.auction_id AND bid.account = ${varName}
+                ))
+            )`
+        );
+    }
 
-        queryString += `(listing.seller = $${accountVar} AND listing.claimed_by_seller IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)`;
-        queryString += `OR (listing.buyer = $${accountVar} AND listing.claimed_by_buyer IS FALSE and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT)`;
-        queryString += `OR (listing.seller = $${accountVar} and listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT)`;
-        queryString += `OR (listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time > ${Math.floor(Date.now() / 1000)}::BIGINT AND EXISTS(
-            SELECT * FROM atomicmarket_auctions_bids bid WHERE bid.market_contract = listing.market_contract AND bid.auction_id = listing.auction_id AND bid.account = $${accountVar}
-        ))`;
-
-        queryString += ') ';
+    if (args.hide_empty_auctions) {
+        query.addCondition('EXISTS(SELECT * FROM atomicmarket_auctions_bids bid ' +
+            'WHERE bid.market_contract = listing.market_contract AND bid.auction_id = listing.auction_id)');
     }
 
     if (args.max_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM atomicmarket_auctions_assets asset 
-            WHERE asset.market_contract = listing.market_contract AND asset.auction_id = listing.auction_id
-        ) <= ${args.max_assets} `;
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM atomicmarket_auctions_assets asset 
+                WHERE asset.market_contract = listing.market_contract AND asset.auction_id = listing.auction_id
+            ) <= ${args.max_assets} `
+        );
     }
 
     if (args.min_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM atomicmarket_auctions_assets asset 
-            WHERE asset.market_contract = listing.market_contract AND asset.auction_id = listing.auction_id
-        ) >= ${args.min_assets} `;
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM atomicmarket_auctions_assets asset 
+                WHERE asset.market_contract = listing.market_contract AND asset.auction_id = listing.auction_id
+            ) >= ${args.min_assets} `
+        );
     }
 
-    if (args.asset_id) {
-        queryString += 'AND EXISTS(' +
-            'SELECT * FROM atomicmarket_auctions_assets asset ' +
-            'WHERE asset.market_contract = listing.market_contract AND ' +
-            'listing.auction_id = listing.auction_id AND ' +
-            'asset.asset_id = $' + ++varCounter + ' ' +
-            ') ';
-        queryValues.push(args.asset_id);
+    if (args.bidder) {
+        query.addCondition('EXISTS(SELECT * FROM atomicmarket_auctions_bids bid ' +
+            'WHERE bid.market_contract = listing.market_contract AND bid.auction_id = listing.auction_id AND ' +
+            'bid.account = ANY(' + query.addVariable(args.bidder.split(',')) + ') )');
     }
 
     if (args.symbol) {
-        queryString += ' AND listing.token_symbol = $' + ++varCounter + ' ';
-        queryValues.push(args.symbol);
+        query.equal('listing.token_symbol', args.symbol);
 
         if (args.min_price) {
-            queryString += 'AND listing.price >= 1.0 * $' + ++varCounter + ' * POWER(10, "token".token_precision) ';
-            queryValues.push(args.min_price);
+            query.addCondition('listing.price >= 1.0 * ' + query.addVariable(args.min_price) + ' * POWER(10, "token".token_precision)');
         }
 
         if (args.max_price) {
-            queryString += 'AND listing.price <= 1.0 * $' + ++varCounter + ' * POWER(10, "token".token_precision) ';
-            queryValues.push(args.max_price);
+            query.addCondition('listing.price <= 1.0 * ' + query.addVariable(args.max_price) + ' * POWER(10, "token".token_precision)');
         }
+    } else if (args.min_price || args.max_price) {
+        throw new ApiError('Price range filters require the "symbol" filter');
     }
 
     if (args.state) {
@@ -360,22 +316,13 @@ export function buildAuctionFilter(
             stateConditions.push(`(listing.state = ${AuctionState.LISTED.valueOf()} AND listing.end_time <= ${Math.floor(Date.now() / 1000)}::BIGINT AND listing.buyer IS NULL)`);
         }
 
-        queryString += 'AND (' + stateConditions.join(' OR ') + ') ';
+        query.addCondition('(' + stateConditions.join(' OR ') + ')');
     }
-
-    return {
-        values: queryValues,
-        str: queryString,
-        counter: varCounter
-    };
 }
 
-export function buildBuyofferFilter(
-    req: express.Request, varOffset: number
-): {str: string, values: any[], counter: number} {
+export function buildBuyofferFilter(req: express.Request, query: QueryBuilder): void {
     const args = filterQueryArgs(req, {
-        state: {type: 'string', min: 0},
-        asset_id: {type: 'int', min: 1},
+        state: {type: 'string', min: 1},
 
         min_assets: {type: 'int', min: 1},
         max_assets: {type: 'int', min: 1},
@@ -385,70 +332,54 @@ export function buildBuyofferFilter(
         max_price: {type: 'float', min: 0}
     });
 
-    let varCounter = varOffset;
-    const queryValues: any[] = [];
-    let queryString = '';
+    buildListingFilter(req, query);
 
-    const listingFilter = buildListingFilter(req, varCounter);
+    if (hasAssetFilter(req, ['collection_name']) || hasDataFilters(req)) {
+        const assetQuery = new QueryBuilder(
+            'SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset, ' +
+            'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id)',
+            query.buildValues()
+        );
 
-    queryString += listingFilter.str;
-    queryValues.push(...listingFilter.values);
-    varCounter += listingFilter.values.length;
+        assetQuery.addCondition('asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id');
+        assetQuery.join('buyoffer_asset', 'listing', ['market_contract', 'buyoffer_id']);
 
-    if (hasAssetFilter(req) || hasDataFilters(req)) {
-        const filter = buildAssetFilter(req, varCounter, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
+        buildAssetFilter(req, assetQuery, {assetTable: '"asset"', templateTable: '"template"', allowDataFilter: true});
 
-        queryString += 'AND EXISTS(' +
-            'SELECT * ' +
-            'FROM atomicmarket_buyoffers_assets buyoffer_asset, ' +
-                'atomicassets_assets asset LEFT JOIN atomicassets_templates "template" ON ("asset".contract = "template".contract AND "asset".template_id = "template".template_id) ' +
-            'WHERE ' +
-            'asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id AND ' +
-            'buyoffer_asset.buyoffer_id = listing.buyoffer_id AND ' +
-            'buyoffer_asset.market_contract = listing.market_contract ' + filter.str + ' ' +
-            ') ';
-
-        queryValues.push(...filter.values);
-        varCounter += filter.values.length;
+        query.addCondition('EXISTS(' + assetQuery.buildString() + ')');
+        query.setVars(assetQuery.buildValues());
     }
 
     if (args.max_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM atomicmarket_buyoffers_assets asset 
-            WHERE asset.market_contract = listing.market_contract AND asset.buyoffer_id = listing.buyoffer_id
-        ) <= ${args.max_assets} `;
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM atomicmarket_buyoffers_assets asset 
+                WHERE asset.market_contract = listing.market_contract AND asset.buyoffer_id = listing.buyoffer_id
+            ) <= ${args.max_assets}`
+        );
     }
 
     if (args.min_assets) {
-        queryString += `AND (
-            SELECT COUNT(*) FROM atomicmarket_buyoffers_assets asset 
-            WHERE asset.market_contract = listing.market_contract AND asset.buyoffer_id = listing.buyoffer_id
-        ) >= ${args.min_assets} `;
-    }
-
-    if (args.asset_id) {
-        queryString += 'AND EXISTS(' +
-            'SELECT * FROM atomicmarket_buyoffers_assets asset ' +
-            'WHERE asset.market_contract = listing.market_contract AND ' +
-            'listing.buyoffer_id = listing.buyoffer_id AND ' +
-            'asset.asset_id = $' + ++varCounter + ' ' +
-            ') ';
-        queryValues.push(args.asset_id);
+        query.addCondition(
+            `(
+                SELECT COUNT(*) FROM atomicmarket_buyoffers_assets asset 
+                WHERE asset.market_contract = listing.market_contract AND asset.buyoffer_id = listing.buyoffer_id
+            ) >= ${args.min_assets}`
+        );
     }
 
     if (args.symbol) {
-        queryString += ' AND listing.token_symbol = $' + ++varCounter + ' ';
-        queryValues.push(args.symbol);
+        query.equal('listing.token_symbol', args.symbol);
 
         if (args.min_price) {
-            queryString += 'AND listing.price >= 1.0 * $' + ++varCounter + ' * POWER(10, "token".token_precision) ';
-            queryValues.push(args.min_price);
+            query.addCondition('listing.price >= 1.0 * ' + query.addVariable(args.min_price) + ' * POWER(10, "token".token_precision)');
         }
 
         if (args.max_price) {
-            queryString += 'AND listing.price <= 1.0 * $' + ++varCounter + ' * POWER(10, "token".token_precision) ';
-            queryValues.push(args.max_price);
+            query.addCondition('listing.price <= 1.0 * ' + query.addVariable(args.max_price) + ' * POWER(10, "token".token_precision)');
         }
+    } else if (args.min_price || args.max_price) {
+        throw new ApiError('Price range filters require the "symbol" filter');
     }
 
     if (args.state) {
@@ -458,12 +389,12 @@ export function buildBuyofferFilter(
             stateConditions.push(
                 `(listing.state = ${BuyofferState.PENDING.valueOf()} AND 
                     NOT EXISTS(
-                        SELECT * FROM atomicmarket_buyoffer_assets buyoffer_asset, atomicassets_assets asset) 
+                        SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset, atomicassets_assets asset
                         WHERE asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id AND
                             buyoffer_asset.market_contract = listing.market_contract AND buyoffer_asset.buyoffer_id = listing.buyoffer_id AND
                             asset.owner != listing.seller
                     )
-                `);
+                )`);
         }
 
         if (args.state.split(',').indexOf(String(BuyofferApiState.DECLINED.valueOf())) >= 0) {
@@ -482,20 +413,14 @@ export function buildBuyofferFilter(
             stateConditions.push(
                 `(listing.state = ${BuyofferState.PENDING.valueOf()} AND 
                     EXISTS(
-                        SELECT * FROM atomicmarket_buyoffer_assets buyoffer_asset, atomicassets_assets asset) 
+                        SELECT * FROM atomicmarket_buyoffers_assets buyoffer_asset, atomicassets_assets asset
                         WHERE asset.contract = buyoffer_asset.assets_contract AND asset.asset_id = buyoffer_asset.asset_id AND
                             buyoffer_asset.market_contract = listing.market_contract AND buyoffer_asset.buyoffer_id = listing.buyoffer_id AND
                             asset.owner != listing.seller
                     )
-                `);
+                )`);
         }
 
-        queryString += 'AND (' + stateConditions.join(' OR ') + ') ';
+        query.addCondition('(' + stateConditions.join(' OR ') + ')');
     }
-
-    return {
-        values: queryValues,
-        str: queryString,
-        counter: varCounter
-    };
 }

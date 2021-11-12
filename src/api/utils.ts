@@ -1,6 +1,8 @@
 import { HTTPServer } from './server';
 import { Namespace } from 'socket.io';
 import { NotificationData } from '../filler/notifier';
+import express = require('express');
+import { ApiError } from './error';
 
 export async function getContractActionLogs(
     server: HTTPServer, contract: string, actions: string[], condition: {[key: string]: any},
@@ -27,9 +29,8 @@ export async function getContractActionLogs(
 
     const queryStr = 'SELECT global_sequence log_id, name, metadata "data", encode(txid::bytea, \'hex\') txid, created_at_block, created_at_time ' +
         'FROM contract_traces ' +
-        'WHERE account = $1 AND name = ANY($2) AND ' +
-        metadata_query +
-        'ORDER BY global_sequence ' + (order === 'asc' ? 'ASC' : 'DESC') + ' LIMIT $4 OFFSET $5 ';
+        'WHERE account = $1 AND name = ANY($2) AND ' + metadata_query +
+        'ORDER BY global_sequence + 1 ' + (order === 'asc' ? 'ASC' : 'DESC') + ' LIMIT $4 OFFSET $5 ';
 
     const query = await server.query(queryStr, [contract, actions, metadata_value, limit, offset]);
     const emptyCondition = Object.keys(condition).reduce((prev, curr) => ({...prev, [curr]: undefined}), {});
@@ -85,4 +86,16 @@ export function extractNotificationIdentifiers(notifications: NotificationData[]
     }
 
     return result;
+}
+
+export function respondApiError(res: express.Response, error: Error): express.Response {
+    if ((error as ApiError).showMessage) {
+        return res.status(500).json({success: false, message: error.message});
+    }
+
+    if (error.message && String(error.message).search('canceling statement due to statement timeout') >= 0) {
+        return res.status(500).json({success: false, message: 'Max database query time exceeded. Please try to add more filters to your query.'});
+    }
+
+    return res.status(500).json({success: false, message: 'Internal Server Error'});
 }

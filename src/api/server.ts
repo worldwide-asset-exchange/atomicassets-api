@@ -1,14 +1,12 @@
 import * as express from 'express';
 import {Server} from 'socket.io';
 import * as http from 'http';
-import * as path from 'path';
 
 import * as expressRateLimit from 'express-rate-limit';
 import * as expressRedisStore from 'rate-limit-redis';
 
 import * as bodyParser from 'body-parser';
 import * as cors from 'cors';
-import * as cookieParser from 'cookie-parser';
 import { Pool, QueryResult } from 'pg';
 
 import ConnectionManager from '../connections/manager';
@@ -16,6 +14,8 @@ import { IServerConfig } from '../types/config';
 import logger from '../utils/winston';
 import { expressRedisCache, ExpressRedisCacheHandler } from '../utils/cache';
 import { eosioTimestampToDate } from '../utils/eosio';
+import * as swagger from 'swagger-ui-express';
+import { getOpenApiDescription, LogSchema } from './docs';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const packageJson: any = require('../../package.json');
@@ -25,6 +25,7 @@ export class HTTPServer {
 
     readonly web: WebServer;
     readonly socket: SocketServer;
+    readonly docs: DocumentationServer;
 
     readonly database: Pool;
 
@@ -51,13 +52,14 @@ export class HTTPServer {
         });
 
         this.socket = new SocketServer(this);
+        this.docs = new DocumentationServer(this);
     }
 
     listen(): void {
-        this.httpServer.listen(this.config.server_port, this.config.server_addr);
+        this.httpServer.listen(this.config.server_port || 9000, this.config.server_addr || '0.0.0.0');
     }
 
-    async query(queryText: string, values?: any[]): Promise<QueryResult> {
+    async query<T = any>(queryText: string, values?: any[]): Promise<QueryResult<T>> {
         const startTime = Date.now();
 
         logger.debug(queryText, values);
@@ -139,12 +141,13 @@ export class WebServer {
     }
 
     private middleware(): void {
-        this.express.use(bodyParser.json());
-        this.express.use(bodyParser.urlencoded({ extended: false }));
-        this.express.use(cookieParser());
-        this.express.use(cors());
+        this.express.use(bodyParser.json({limit: '10MB'}));
+        this.express.use(bodyParser.urlencoded({ extended: false, limit: '10MB' }));
+        this.express.use(cors({allowedHeaders: '*'}));
 
-        this.express.use((req, _, next) => {
+        this.express.use((req, res, next) => {
+            res.setHeader('Access-Control-Allow-Headers', '*');
+
             logger.debug(req.ip + ': ' + req.method + ' ' + req.originalUrl, req.body);
 
             next();
@@ -238,14 +241,20 @@ export class WebServer {
                 }
             }
 
-            return res.send('success');
+            return res.send('success:' + server.connection.chain.chainId);
+        });
+
+        router.get(['/healthc', '/eosio-contract-api/healthc'], async (req, res) => {
+            if (await server.connection.alive()) {
+                res.status(200).send('success');
+            } else {
+                res.status(500).send('error');
+            }
         });
 
         router.get(['/timestamp', '/eosio-contract-api/timestamp'], async (_: express.Request, res: express.Response) => {
             res.json({success: true, data: Date.now(), query_time: Date.now()});
         });
-
-        router.use('/docs/assets', express.static(path.resolve(__dirname, '../../docs/assets')));
 
         this.express.use(router);
     }
@@ -260,5 +269,55 @@ export class SocketServer {
             allowEIO3: true,
             transports: ['websocket']
         });
+    }
+}
+
+export class DocumentationServer {
+    documentation: any;
+
+    constructor(private server: HTTPServer) {
+        this.documentation = {
+            openapi: '3.0.0',
+            info: {
+                description: getOpenApiDescription(server),
+                version: packageJson.version,
+                title: 'EOSIO Contract API'
+            },
+            servers: [
+                {url: 'https://' + server.config.server_name},
+                {url: 'http://' + server.config.server_name}
+            ],
+            tags: [],
+            paths: {},
+            components: {
+                schemas: {
+                    'Log': LogSchema
+                }
+            }
+        };
+    }
+
+    addTags(data: any[]): void {
+        this.documentation.tags.push(...data);
+    }
+
+    addPaths(data: any): void {
+        Object.assign(this.documentation.paths, data);
+    }
+
+    addSchemas(data: any): void {
+        Object.assign(this.documentation.components.schemas, data);
+    }
+
+    render(): void {
+        const router = express.Router();
+
+        router.use('/docs', swagger.serve);
+        router.get('/docs', swagger.setup(this.documentation, {
+            customCss: '.topbar { display: none; }',
+            customCssUrl: 'https://cdn.jsdelivr.net/npm/swagger-ui-themes@3.0.0/themes/3.x/theme-flattop.min.css'
+        }));
+
+        this.server.web.express.use(router);
     }
 }

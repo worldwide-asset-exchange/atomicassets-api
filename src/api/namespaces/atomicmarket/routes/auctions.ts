@@ -4,7 +4,7 @@ import { AtomicMarketNamespace, AuctionApiState } from '../index';
 import { HTTPServer } from '../../../server';
 import { formatAuction } from '../format';
 import { fillAuctions } from '../filler';
-import { buildAuctionFilter } from '../utils';
+import { buildAuctionFilter, hasListingFilter } from '../utils';
 import {
     actionGreylistParameters,
     dateBoundaryParameters,
@@ -12,20 +12,20 @@ import {
     paginationParameters,
     primaryBoundaryParameters
 } from '../../../docs';
-import { assetFilterParameters, atomicDataFilter } from '../../atomicassets/openapi';
-import logger from '../../../../utils/winston';
+import { extendedAssetFilterParameters, atomicDataFilter, baseAssetFilterParameters } from '../../atomicassets/openapi';
 import { buildBoundaryFilter, filterQueryArgs } from '../../utils';
 import { listingFilterParameters } from '../openapi';
-import { buildGreylistFilter } from '../../atomicassets/utils';
+import { buildGreylistFilter, hasAssetFilter, hasDataFilters } from '../../atomicassets/utils';
 import {
     applyActionGreylistFilters,
     createSocketApiNamespace,
     extractNotificationIdentifiers,
-    getContractActionLogs
+    getContractActionLogs, respondApiError
 } from '../../../utils';
 import ApiNotificationReceiver from '../../../notification';
 import { NotificationData } from '../../../../filler/notifier';
 import { eosioTimestampToDate } from '../../../../utils/eosio';
+import QueryBuilder from '../../../builder';
 
 export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServer, router: express.Router): any {
     router.all(['/v1/auctions', '/v1/auctions/_count'], server.web.caching(), async (req, res) => {
@@ -44,65 +44,61 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                 order: {type: 'string', values: ['asc', 'desc'], default: 'desc'}
             });
 
-            const auctionFilter = buildAuctionFilter(req, 1);
-
-            let queryString = 'SELECT listing.auction_id ' +
+            const query = new QueryBuilder(
+                'SELECT listing.auction_id ' +
                 'FROM atomicmarket_auctions listing ' +
-                    'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol) ' +
-                'WHERE listing.market_contract = $1 ' + auctionFilter.str + ' AND ' +
-                    'NOT EXISTS (' +
-                        'SELECT * FROM atomicmarket_auctions_assets auction_asset ' +
-                        'WHERE auction_asset.market_contract = listing.market_contract AND auction_asset.auction_id = listing.auction_id AND ' +
-                            'NOT EXISTS (SELECT * FROM atomicassets_assets asset WHERE asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id)' +
-                    ')';
-            const queryValues = [core.args.atomicmarket_account, ...auctionFilter.values];
-            let varCounter = queryValues.length;
+                'JOIN atomicmarket_tokens "token" ON (listing.market_contract = "token".market_contract AND listing.token_symbol = "token".token_symbol)'
+            );
 
-            const blacklistFilter = buildGreylistFilter(req, varCounter, 'listing.collection_name');
-            queryValues.push(...blacklistFilter.values);
-            varCounter += blacklistFilter.values.length;
-            queryString += blacklistFilter.str;
+            query.equal('listing.market_contract', core.args.atomicmarket_account);
 
-            const boundaryFilter = buildBoundaryFilter(
-                req, varCounter, 'listing.auction_id', 'int',
+            query.addCondition(
+                'NOT EXISTS (' +
+                'SELECT * FROM atomicmarket_auctions_assets auction_asset ' +
+                'WHERE auction_asset.market_contract = listing.market_contract AND auction_asset.auction_id = listing.auction_id AND ' +
+                'NOT EXISTS (SELECT * FROM atomicassets_assets asset WHERE asset.contract = auction_asset.assets_contract AND asset.asset_id = auction_asset.asset_id)' +
+                ')'
+            );
+
+            buildAuctionFilter(req, query);
+            buildGreylistFilter(req, query, {collectionName: 'listing.collection_name'});
+            buildBoundaryFilter(
+                req, query, 'listing.auction_id', 'int',
                 args.sort === 'updated' ? 'listing.updated_at_time' : 'listing.created_at_time'
             );
-            queryValues.push(...boundaryFilter.values);
-            varCounter += boundaryFilter.values.length;
-            queryString += boundaryFilter.str;
 
             if (req.originalUrl.search('/_count') >= 0) {
                 const countQuery = await server.query(
-                    'SELECT COUNT(*) counter FROM (' + queryString + ') x',
-                    queryValues
+                    'SELECT COUNT(*) counter FROM (' + query.buildString() + ') x',
+                    query.buildValues()
                 );
 
                 return res.json({success: true, data: countQuery.rows[0].counter, query_time: Date.now()});
             }
 
-            const sortMapping: {[key: string]: {column: string, nullable: boolean}} = {
-                auction_id: {column: 'listing.auction_id', nullable: false},
-                ending: {column: 'listing.end_time', nullable: false},
-                created: {column: 'listing.created_at_time', nullable: false},
-                updated: {column: 'listing.updated_at_time', nullable: false},
-                price: {column: 'listing.price', nullable: true},
-                template_mint: {column: 'LOWER(listing.template_mint)', nullable: true}
+            const sortMapping: {[key: string]: {column: string, nullable: boolean, numericIndex: boolean}} = {
+                auction_id: {column: 'listing.auction_id', nullable: false, numericIndex: true},
+                ending: {column: 'listing.end_time', nullable: false, numericIndex: true},
+                created: {column: 'listing.created_at_time', nullable: false, numericIndex: true},
+                updated: {column: 'listing.updated_at_time', nullable: false, numericIndex: true},
+                price: {column: 'listing.price', nullable: true, numericIndex: false},
+                template_mint: {column: 'LOWER(listing.template_mint)', nullable: true, numericIndex: false}
             };
 
-            queryString += 'ORDER BY ' + sortMapping[args.sort].column + ' ' + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.auction_id ASC ';
-            queryString += 'LIMIT $' + ++varCounter + ' OFFSET $' + ++varCounter + ' ';
-            queryValues.push(args.limit);
-            queryValues.push((args.page - 1) * args.limit);
+            const ignoreIndex = (hasAssetFilter(req) || hasDataFilters(req) || hasListingFilter(req)) && sortMapping[args.sort].numericIndex;
 
-            const auctionQuery = await server.query(queryString, queryValues);
+            query.append('ORDER BY ' + sortMapping[args.sort].column + (ignoreIndex ? ' + 1 ' : ' ') + args.order + ' ' + (sortMapping[args.sort].nullable ? 'NULLS LAST' : '') + ', listing.auction_id ASC');
+            query.append('LIMIT ' + query.addVariable(args.limit) + ' OFFSET ' + query.addVariable((args.page - 1) * args.limit) + ' ');
+
+            const auctionResult = await server.query(query.buildString(), query.buildValues());
 
             const auctionLookup: {[key: string]: any} = {};
-            const query = await server.query(
+            const result = await server.query(
                 'SELECT * FROM atomicmarket_auctions_master WHERE market_contract = $1 AND auction_id = ANY ($2)',
-                [core.args.atomicmarket_account, auctionQuery.rows.map(row => row.auction_id)]
+                [core.args.atomicmarket_account, auctionResult.rows.map(row => row.auction_id)]
             );
 
-            query.rows.reduce((prev, current) => {
+            result.rows.reduce((prev, current) => {
                 prev[String(current.auction_id)] = current;
 
                 return prev;
@@ -110,12 +106,12 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
 
             const auctions = await fillAuctions(
                 server, core.args.atomicassets_account,
-                auctionQuery.rows.map((row) => formatAuction(auctionLookup[String(row.auction_id)]))
+                auctionResult.rows.map((row) => formatAuction(auctionLookup[String(row.auction_id)]))
             );
 
             res.json({success: true, data: auctions, query_time: Date.now()});
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -135,8 +131,8 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
 
                 res.json({success: true, data: auctions[0], query_time: Date.now()});
             }
-        } catch (e) {
-            res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     });
 
@@ -157,10 +153,8 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                     (args.page - 1) * args.limit, args.limit, args.order
                 ), query_time: Date.now()
             });
-        } catch (e) {
-            logger.error(e);
-
-            return res.status(500).json({success: false, message: 'Internal Server Error'});
+        } catch (error) {
+            return respondApiError(res, error);
         }
     }));
 
@@ -189,8 +183,30 @@ export function auctionsEndpoints(core: AtomicMarketNamespace, server: HTTPServe
                             required: false,
                             schema: {type: 'string'}
                         },
+                        {
+                            name: 'bidder',
+                            in: 'query',
+                            description: 'Filter by auctions with this bidder',
+                            required: false,
+                            schema: {type: 'string'}
+                        },
+                        {
+                            name: 'participant',
+                            in: 'query',
+                            description: 'Filter by auctions where this account participated and can still claim / bid',
+                            required: false,
+                            schema: {type: 'string'}
+                        },
+                        {
+                            name: 'hide_empty_auctions',
+                            in: 'query',
+                            description: 'Hide auctions with no bids',
+                            required: false,
+                            schema: {type: 'boolean'}
+                        },
                         ...listingFilterParameters,
-                        ...assetFilterParameters,
+                        ...baseAssetFilterParameters,
+                        ...extendedAssetFilterParameters,
                         ...primaryBoundaryParameters,
                         ...dateBoundaryParameters,
                         ...paginationParameters,

@@ -29,7 +29,7 @@ export default class StateHistoryBlockReader {
     private connecting: boolean;
     private stopped: boolean;
 
-    private deserializeWorkers: StaticPool<Array<{type: string, data: Uint8Array, abi?: any}>, any>;
+    private deserializeWorkers: StaticPool<(x: Array<{type: string, data: Uint8Array, abi?: any}>) => any>;
 
     private unconfirmed: number;
     private consumer: BlockConsumer;
@@ -67,6 +67,7 @@ export default class StateHistoryBlockReader {
     connect(): void {
         if (!this.connected && !this.connecting && !this.stopped) {
             logger.info(`Connecting to ship endpoint ${this.endpoint}`);
+            logger.info(`Ship connect options ${JSON.stringify({...this.currentArgs, have_positions: 'removed'})}`);
 
             this.connecting = true;
 
@@ -80,9 +81,13 @@ export default class StateHistoryBlockReader {
     }
 
     reconnect(): void {
-        logger.info('Reconnecting to Ship...');
+        if (this.stopped) {
+            return;
+        }
 
         setTimeout(() => {
+            logger.info('Reconnecting to Ship...');
+
             this.connect();
         }, 5000);
     }
@@ -221,9 +226,14 @@ export default class StateHistoryBlockReader {
                         }
 
                         if (response.this_block) {
-                            this.currentArgs.start_block_num = response.this_block.block_num;
+                            this.currentArgs.start_block_num = response.this_block.block_num + 1;
                         } else {
                             this.currentArgs.start_block_num += 1;
+                        }
+
+                        if (response.this_block && response.last_irreversible && response.this_block.block_num > response.last_irreversible.block_num) {
+                            this.currentArgs.have_positions = this.currentArgs.have_positions.filter(row => row.block_num > response.last_irreversible.block_num);
+                            this.currentArgs.have_positions.push(response.this_block);
                         }
                     }).then();
                 } else {
@@ -252,12 +262,12 @@ export default class StateHistoryBlockReader {
         this.connected = false;
         this.connecting = false;
 
+        this.blocksQueue.clear();
+
         if (this.deserializeWorkers) {
             await this.deserializeWorkers.destroy();
             this.deserializeWorkers = null;
         }
-
-        this.blocksQueue.clear();
 
         this.reconnect();
     }
