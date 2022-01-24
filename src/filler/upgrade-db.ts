@@ -67,7 +67,7 @@ export async function upgradeDb(database: PostgresConnection): Promise<void> {
         logger.info('Found ' + upgradeVersions.length + ' available upgrades. Starting to upgradeDB...');
 
         for (const version of upgradeVersions) {
-            const versionDir = `${__dirname}/../../definitions/migrations/${version}/`;
+            const versionDir = `./definitions/migrations/${version}/`;
 
             logger.info('Upgrade to ' + version + ' ...');
 
@@ -76,6 +76,12 @@ export async function upgradeDb(database: PostgresConnection): Promise<void> {
             await client.query(fs.readFileSync(`${versionDir}database.sql`, {
                 encoding: 'utf8'
             }));
+
+            const scriptFilename = `${versionDir}script.js`;
+            if (fs.existsSync(scriptFilename)) {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                require(scriptFilename)(client);
+            }
 
             for (const handlerName of availableContracts) {
                 const handler = availableHandlers.find(row => row.handlerName === handlerName);
