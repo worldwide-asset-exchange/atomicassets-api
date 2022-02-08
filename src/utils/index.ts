@@ -45,3 +45,21 @@ export function compareVersionString(s1: string, s2: string): number {
 
     return 0;
 }
+
+export function toInt(s: string): number {
+    return parseInt(s, 10);
+}
+
+const floatRE = /^-?[0-9]+(e[0-9]+)?(\.[0-9]+)?$/;
+export function isWeakFloat(value: any): boolean {
+    return typeof value === 'number' || floatRE.test(value);
+}
+
+const intRE = /^-?\d+$/;
+export function isWeakInt(value: any): boolean {
+    return Number.isInteger(value) || intRE.test(value);
+}
+
+export function isWeakIntArray(arr: Array<any>): boolean {
+    return arr.every(isWeakInt);
+}

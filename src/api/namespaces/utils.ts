@@ -1,110 +1,22 @@
 import * as express from 'express';
 import QueryBuilder from '../builder';
+import { filterQueryArgs, FilterValues } from './validation';
 
-export type FilterDefinition = {
-    [key: string]: {
-        type: 'string' | 'int' | 'float' | 'bool',
-        min?: number,
-        max?: number,
-        default?: any,
-        values?: any[]
-    }
-};
+export type SortColumn = {column: string, nullable?: boolean, numericIndex?: boolean};
+export type SortColumnMapping = {[key: string]: SortColumn};
 
-export function mergeRequestData(req: express.Request): {[key: string]: any} {
-    return Object.assign({}, req.query || {}, req.body || {});
-}
+export type RequestValues = {[key: string]: any};
 
-export function filterQueryArgs(req: express.Request, filter: FilterDefinition, keyType: string = null): {[key: string]: any} {
-    const keys = Object.keys(filter);
-    const result: {[key: string]: any} = {};
-    const merged = mergeRequestData(req);
-
-    for (const key of keys) {
-        let data;
-        if (keyType) {
-            // @ts-ignore
-            data = req[keyType] ? req[keyType][key] : undefined;
-        } else {
-            data = merged[key];
-        }
-
-        if (typeof data !== 'string') {
-            result[key] = filter[key].default;
-
-            continue;
-        }
-
-        if (filter[key].type === 'string') {
-            if (typeof filter[key].min === 'number' && data.length < filter[key].min) {
-                result[key] = filter[key].default;
-
-                continue;
-            }
-
-            if (typeof filter[key].max === 'number' && data.length > filter[key].max) {
-                result[key] = filter[key].default;
-
-                continue;
-            }
-
-            if (Array.isArray(filter[key].values) && filter[key].values.indexOf(data) === -1) {
-                result[key] = filter[key].default;
-
-                continue;
-            }
-
-            result[key] = data;
-        } else if (filter[key].type === 'int' || filter[key].type === 'float') {
-            const n = parseFloat(data);
-
-            if (isNaN(n) || (!Number.isInteger(n) && filter[key].type === 'int')) {
-                result[key] = filter[key].default;
-
-                continue;
-            }
-
-            if (typeof filter[key].min === 'number' && n < filter[key].min) {
-                result[key] = filter[key].min;
-
-                continue;
-            }
-
-            if (typeof filter[key].max === 'number' && n > filter[key].max) {
-                result[key] = filter[key].max;
-
-                continue;
-            }
-
-            if (Array.isArray(filter[key].values) && filter[key].values.indexOf(n) === -1) {
-                result[key] = filter[key].default;
-
-                continue;
-            }
-
-            result[key] = n;
-        } else if (filter[key].type === 'bool') {
-            if (typeof data === 'undefined') {
-                result[key] = filter[key].default;
-            }
-
-            if (data === 'true' || data === '1') {
-                result[key] = true;
-            } else if (data === 'false' || data === '0') {
-                result[key] = false;
-            }
-        }
-    }
-
-    return result;
+export function mergeRequestData(req: express.Request): RequestValues {
+    return {...req.query, ...req.body};
 }
 
 export function buildBoundaryFilter(
-    req: express.Request, query: QueryBuilder,
+    values: FilterValues, query: QueryBuilder,
     primaryColumn: string, primaryType: 'string' | 'int',
     dateColumn: string | null
 ): void {
-    const args = filterQueryArgs(req, {
+    const args = filterQueryArgs(values, {
         lower_bound: {type: primaryType, min: 1},
         upper_bound: {type: primaryType, min: 1},
         before: {type: 'int', min: 1},

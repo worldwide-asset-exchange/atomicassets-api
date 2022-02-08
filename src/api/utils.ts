@@ -1,11 +1,13 @@
-import { HTTPServer } from './server';
-import { Namespace } from 'socket.io';
-import { NotificationData } from '../filler/notifier';
-import express = require('express');
-import { ApiError } from './error';
+import {Namespace} from 'socket.io';
+import * as express from 'express';
+
+import {DB, HTTPServer} from './server';
+import {NotificationData} from '../filler/notifier';
+import {ApiError} from './error';
+import logger from '../utils/winston';
 
 export async function getContractActionLogs(
-    server: HTTPServer, contract: string, actions: string[], condition: {[key: string]: any},
+    db: DB, contract: string, actions: string[], condition: { [key: string]: any },
     offset: number = 0, limit: number = 100, order: 'asc' | 'desc' = 'asc'
 ): Promise<Array<{log_id: number, name: string, data: any, txid: string, created_at_block: string, created_at_time: string}>> {
 
@@ -32,7 +34,7 @@ export async function getContractActionLogs(
         'WHERE account = $1 AND name = ANY($2) AND ' + metadata_query +
         'ORDER BY global_sequence + 1 ' + (order === 'asc' ? 'ASC' : 'DESC') + ' LIMIT $4 OFFSET $5 ';
 
-    const query = await server.query(queryStr, [contract, actions, metadata_value, limit, offset]);
+    const query = await db.query(queryStr, [contract, actions, metadata_value, limit, offset]);
     const emptyCondition = Object.keys(condition).reduce((prev, curr) => ({...prev, [curr]: undefined}), {});
 
     return query.rows.map(row => ({
@@ -40,7 +42,10 @@ export async function getContractActionLogs(
     }));
 }
 
-export function applyActionGreylistFilters(actions: string[], args: any): string[] {
+export function applyActionGreylistFilters(
+    actions: string[],
+    args: { action_whitelist?: string, action_blacklist?: string },
+): string[] {
     let result = [...actions];
 
     if (args.action_whitelist) {
@@ -90,11 +95,16 @@ export function extractNotificationIdentifiers(notifications: NotificationData[]
 
 export function respondApiError(res: express.Response, error: Error): express.Response {
     if ((error as ApiError).showMessage) {
-        return res.status(500).json({success: false, message: error.message});
+        return res.status((error as ApiError).code).json({success: false, message: error.message});
     }
 
     if (error.message && String(error.message).search('canceling statement due to statement timeout') >= 0) {
-        return res.status(500).json({success: false, message: 'Max database query time exceeded. Please try to add more filters to your query.'});
+        return res.status(500).json({
+            success: false,
+            message: 'Max database query time exceeded. Please try to add more filters to your query.'
+        });
+    } else {
+        logger.warn('Error occured while processing request', error);
     }
 
     return res.status(500).json({success: false, message: 'Internal Server Error'});

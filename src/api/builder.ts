@@ -1,5 +1,7 @@
+import { isWeakIntArray } from '../utils';
+
 export default class QueryBuilder {
-    private  readonly baseQuery: string;
+    private baseQuery: string;
 
     private conditions: string[];
     private aggregations: string[];
@@ -16,7 +18,6 @@ export default class QueryBuilder {
         this.conditions = [];
         this.aggregations = [];
         this.ending = '';
-
     }
 
     addVariable(value: any): string {
@@ -47,28 +48,44 @@ export default class QueryBuilder {
 
     equalMany(column: string, values: any[]): QueryBuilder {
         if (!Array.isArray(values)) {
-            throw new Error('equalMany only accept arrays as value');
+            throw new Error('equalMany only accepts arrays as value');
         }
 
         if (values.length === 1) {
             return this.equal(column, values[0]);
         }
 
-        this.conditions.push(column + ' = ANY(' + this.addVariable(values) + ')');
+        if (values.length > 10) {
+            this.conditions.push(`EXISTS (SELECT FROM UNNEST(${this.addVariable(values)}::${isWeakIntArray(values) ? 'BIGINT' : 'TEXT'}[]) u(c) WHERE u.c = ${column})`);
+        } else {
+            this.conditions.push(`${column} = ANY(${this.addVariable(values)})`);
+        }
 
         return this;
     }
 
-    notMany(column: string, values: any[]): QueryBuilder {
+    notMany(column: string, values: any[], includeNull: boolean = false): QueryBuilder {
         if (!Array.isArray(values)) {
-            throw new Error('notMany only accept arrays as value');
+            throw new Error('notMany only accepts arrays as value');
         }
+
+        const queryString: string[] = [];
 
         if (values.length === 1) {
             return this.unequal(column, values[0]);
         }
 
-        this.conditions.push('NOT (' + column + ' = ANY(' + this.addVariable(values) + '))');
+        if (values.length > 10) {
+            queryString.push(`NOT EXISTS (SELECT FROM UNNEST(${this.addVariable(values)}::${isWeakIntArray(values) ? 'BIGINT' : 'TEXT'}[]) u(c) WHERE u.c = ${column})`);
+        } else {
+            queryString.push(`${column} != ALL(${this.addVariable(values)})`);
+        }
+
+        if (includeNull) {
+            queryString.push(`${column} IS NULL`);
+        }
+
+        this.conditions.push(`(${queryString.join(' OR ')})`);
 
         return this;
     }
@@ -86,7 +103,7 @@ export default class QueryBuilder {
     }
 
     addCondition(text: string): QueryBuilder {
-        this.conditions.push(text);
+        this.conditions.push(`(${text})`);
 
         return this;
     }
@@ -97,8 +114,20 @@ export default class QueryBuilder {
         return this;
     }
 
+    paginate(page: number, limit: number): QueryBuilder {
+        this.append('LIMIT ' + this.addVariable(limit) + ' OFFSET ' + this.addVariable((page - 1) * limit));
+
+        return this;
+    }
+
     append(text: string): QueryBuilder {
         this.ending += text + ' ';
+
+        return this;
+    }
+
+    appendToBase(text: string): QueryBuilder {
+        this.baseQuery += text + ' ';
 
         return this;
     }
@@ -131,4 +160,21 @@ export default class QueryBuilder {
     buildValues(): any[] {
         return this.values;
     }
+
+    debug(plain: boolean = false): void {
+        if (plain) {
+            const sql = this.buildValues().reduce((s, val, i) => {
+                if (Array.isArray(val)) {
+                    val = `ARRAY[${val.map(s => `'${s}'`).join(',')}]`;
+                } else if (typeof val === 'string') {
+                    val = `'${val}'`;
+                }
+                return s.replace(`$${i + 1}`, val);
+            }, this.buildString());
+            console.log(sql);
+        } else {
+            console.log(this.buildString(), this.buildValues());
+        }
+    }
+
 }

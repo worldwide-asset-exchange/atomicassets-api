@@ -14,14 +14,22 @@ import { OfferApi } from './routes/offers';
 import { accountsEndpoints } from './routes/accounts';
 import ApiNotificationReceiver from '../../notification';
 import { burnEndpoints } from './routes/burns';
+import { ActionHandlerContext } from '../../actionhandler';
+import {ILimits} from "../../../types/config";
 
 export type AtomicAssetsNamespaceArgs = {
-    atomicassets_account: string,
-    connected_reader: string,
-    socket_features: {
-        asset_update: boolean
-    }
+    connected_reader: string;
+
+    atomicassets_account: string;
+
+    socket_features?: {
+        asset_update?: boolean
+    };
+
+    limits?: ILimits;
 };
+
+export type AtomicAssetsContext = ActionHandlerContext<AtomicAssetsNamespaceArgs>;
 
 export class AtomicAssetsNamespace extends ApiNamespace {
     static namespaceName = 'atomicassets';

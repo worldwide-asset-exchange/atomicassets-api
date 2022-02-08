@@ -31,9 +31,13 @@ export default class ConnectionManager {
         );
     }
 
+    async connect(): Promise<void> {
+        await this.database.connect();
+        await this.redis.connect();
+    }
+
     async alive(): Promise<boolean> {
         try {
-            await this.chain.rpc.get_info();
             await this.redis.ioRedis.ping();
             await this.database.pool.query('SELECT 1');
 

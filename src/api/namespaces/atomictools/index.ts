@@ -5,11 +5,16 @@ import { HTTPServer } from '../../server';
 import { atomictoolsComponents } from './openapi';
 import { configEndpoints } from './routes/config';
 import { linksEndpoints } from './routes/links';
+import { ActionHandlerContext } from '../../actionhandler';
+import { ILimits } from "../../../types/config";
 
 export type AtomicToolsNamespaceArgs = {
     atomictools_account: string,
-    atomicassets_account: string
+    atomicassets_account: string,
+    limits?: ILimits
 };
+
+export type AtomicToolsContext = ActionHandlerContext<AtomicToolsNamespaceArgs>;
 
 export class AtomicToolsNamespace extends ApiNamespace {
     static namespaceName = 'atomictools';
