@@ -49,8 +49,8 @@ export async function getCollectionsAction(params: RequestValues, ctx: AtomicAss
         query.addCondition(`${query.addVariable(args.search)} <% (collection.collection_name || ' ' || COALESCE(collection.data->>'name', ''))`);
     }
 
-    buildBoundaryFilter(params, query, 'collection_name', 'string', 'created_at_time');
-    buildGreylistFilter(params, query, {collectionName: 'collection_name'});
+    buildBoundaryFilter(params, query, 'collection.collection_name', 'string', 'collection.created_at_time');
+    buildGreylistFilter(params, query, {collectionName: 'collection.collection_name'});
 
     if (args.count) {
         const countQuery = await ctx.db.query(
