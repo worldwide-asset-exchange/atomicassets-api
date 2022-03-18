@@ -216,6 +216,7 @@ export class WebServer {
             }
 
             let chainHealth;
+            let headBlockSyncValue;
 
             try {
                 const info = await infoRequest;
@@ -237,6 +238,12 @@ export class WebServer {
                 chainHealth = {status: 'ERROR', head_block: 0, head_time: 0};
             }
 
+            if (databaseHealth.readers.length > 0) {
+                headBlockSyncValue = (info.head_block_num - parseInt(databaseHealth.readers[0].block_num))
+            } else {
+                headBlockSyncValue = "ERROR"
+            }
+
             return {
                 success: true, data: {
                     version: packageJson.version,
@@ -244,7 +251,8 @@ export class WebServer {
                     redis: {
                         status: server.connection.redis.ioRedis.status === 'ready' ? 'OK' : 'ERROR'
                     },
-                    chain: chainHealth
+                    chain: chainHealth,
+                    head_block_sync_value: headBlockSyncValue,
                 }, query_time: Date.now()
             };
         }
