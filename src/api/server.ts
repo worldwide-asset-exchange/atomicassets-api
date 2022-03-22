@@ -204,13 +204,12 @@ export class WebServer {
 
         async function buildHealthResponse(): Promise<any> {
             let databaseHealth = {status: 'INVALID', readers: <string[]>[]};
-            let databaseBlockNum = 0;
+
             try {
                 const query = await server.connection.database.query('SELECT block_num FROM contract_readers');
 
                 if (query.rowCount > 0) {
                     databaseHealth = {status: 'OK', readers: query.rows};
-                    databaseBlockNum = parseInt(query.rows[0].block_num)
                 }
             } catch (e) {
                 databaseHealth = {status: 'ERROR', readers: []};
@@ -222,11 +221,6 @@ export class WebServer {
             try {
                 const info = await infoRequest;
 
-                if (databaseHealth.readers.length > 0) {
-                    headBlockSyncValue = (info.head_block_num - databaseBlockNum))
-                } else {
-                    headBlockSyncValue = "ERROR"
-                }
                 if (Date.now() - 20 * 1000 < new Date(info.head_block_time + '+0000').getTime()) {
                     chainHealth = {
                         status: 'OK',
@@ -243,7 +237,13 @@ export class WebServer {
             } catch (e) {
                 chainHealth = {status: 'ERROR', head_block: 0, head_time: 0};
             }
-            
+
+            if (databaseHealth.readers.length > 0) {
+                headBlockSyncValue = (info.head_block_num - parseInt(databaseHealth.readers[0].block_num))
+            } else {
+                headBlockSyncValue = "ERROR"
+            }
+
             return {
                 success: true, data: {
                     version: packageJson.version,
