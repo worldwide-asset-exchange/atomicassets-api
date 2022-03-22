@@ -210,7 +210,7 @@ export class WebServer {
 
                 if (query.rowCount > 0) {
                     databaseHealth = {status: 'OK', readers: query.rows};
-                    databaseBlockNum = parseInt(query.rows[0].block_num);
+                    databaseBlockNum = parseInt(query.rows[0].block_num)
                 }
             } catch (e) {
                 databaseHealth = {status: 'ERROR', readers: []};
@@ -223,9 +223,9 @@ export class WebServer {
                 const info = await infoRequest;
 
                 if (databaseHealth.readers.length > 0) {
-                    headBlockSyncValue = (info.head_block_num - databaseBlockNum);
+                    headBlockSyncValue = (info.head_block_num - databaseBlockNum))
                 } else {
-                    headBlockSyncValue = "ERROR";
+                    headBlockSyncValue = "ERROR"
                 }
                 if (Date.now() - 20 * 1000 < new Date(info.head_block_time + '+0000').getTime()) {
                     chainHealth = {
@@ -252,7 +252,7 @@ export class WebServer {
                         status: server.connection.redis.ioRedis.status === 'ready' ? 'OK' : 'ERROR'
                     },
                     chain: chainHealth,
-                    head_block_sync_value: headBlockSyncValue
+                    head_block_sync_value: headBlockSyncValue,
                 }, query_time: Date.now()
             };
         }
